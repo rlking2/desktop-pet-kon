@@ -1,0 +1,16 @@
+{
+  "name": "dsh-whale-pet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DSH 官方拟人化鲸鱼娘桌宠 —— 阶段0：透明无边框置顶窗口，能拖能跑",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "autotest": "node scripts/autotest.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^44.4.5"
+  }
+}

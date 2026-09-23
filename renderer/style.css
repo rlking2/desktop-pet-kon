@@ -1,0 +1,170 @@
+/* 鲸鱼娘桌宠 · 样式（深海蓝主题） */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  cursor: default;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+.scene {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* ---------- 气泡 ---------- */
+.bubble {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translate(-50%, 0) scale(.9);
+  max-width: 232px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .96);
+  color: #14405f;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  white-space: pre-wrap;
+  border: 2px solid #7fd0f5;
+  box-shadow: 0 4px 12px rgba(6, 40, 70, .3);
+  opacity: 0;
+  transition: opacity .18s ease, transform .18s ease;
+  pointer-events: none;
+}
+.bubble.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  transform: translateX(-50%);
+  width: 0; height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-top: 9px solid #7fd0f5;
+}
+
+/* ---------- 角色 ---------- */
+.pet {
+  position: relative;
+  width: 190px;
+  height: 236px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  filter: drop-shadow(0 6px 10px rgba(8, 45, 80, .38));
+  -webkit-app-region: drag;
+  transition: transform .15s ease;
+}
+.pet:active { cursor: grabbing; }
+
+.whale {
+  width: 190px;
+  height: 190px;
+  overflow: visible;
+  animation: breathe 3.2s ease-in-out infinite;
+  transform-origin: 50% 82%;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50%      { transform: translateY(-5px) scale(1.018, .985); }
+}
+
+.eye { animation: blink 4.6s infinite; transform-origin: center; transform-box: fill-box; }
+@keyframes blink {
+  0%, 91%, 100% { transform: scaleY(1); }
+  94%, 97%      { transform: scaleY(.08); }
+}
+
+.blush { opacity: .5; transition: opacity .2s ease; }
+
+.name {
+  margin-top: 6px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #f2fbff;
+  padding: 1px 9px;
+  border-radius: 9px;
+  background: rgba(24, 78, 124, .78);
+  border: 1px solid rgba(160, 222, 255, .6);
+  white-space: nowrap;
+}
+
+.hint {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #dff4ff;
+  text-shadow: 0 1px 3px rgba(0, 20, 40, .9);
+  opacity: 0;
+  transition: opacity .2s ease;
+  white-space: nowrap;
+}
+.pet:hover .hint { opacity: .95; }
+
+/* ---------- 互动状态 ---------- */
+.pet.hop .whale { animation: hop .5s ease; }
+@keyframes hop {
+  0%   { transform: translateY(0) scale(1); }
+  35%  { transform: translateY(-24px) scale(.96, 1.06); }
+  65%  { transform: translateY(0) scale(1.08, .92); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+.pet.pat .whale { animation: pat .7s ease; }
+@keyframes pat {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.06, .94) rotate(-2deg); }
+}
+.pet.pat .blush { opacity: .95; }
+
+.pet.angry .whale { animation: angry .4s ease-in-out 3; }
+@keyframes angry {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  25%      { transform: translateX(-6px) rotate(-3deg); }
+  75%      { transform: translateX(6px) rotate(3deg); }
+}
+.pet.angry .blush { opacity: 1; }
+
+/* ---------- 自检边框层（仅 AUTOTEST 时显示） ---------- */
+.dbg {
+  position: absolute;
+  inset: 0;
+  border: 1px dashed rgba(255, 80, 120, .9);
+  display: none;
+  pointer-events: none;
+  z-index: 99;
+}
+.dbg.on { display: block; }
+.dbg .k {
+  position: absolute;
+  width: 14px; height: 14px;
+  border: 3px solid #ff3f6f;
+}
+.dbg .tl { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+.dbg .tr { top: -2px; right: -2px; border-left: 0; border-bottom: 0; }
+.dbg .bl { bottom: -2px; left: -2px; border-right: 0; border-top: 0; }
+.dbg .br { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+.dbg-label {
+  position: absolute;
+  top: 2px; left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: #fff;
+  background: rgba(255, 63, 111, .92);
+  padding: 1px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}

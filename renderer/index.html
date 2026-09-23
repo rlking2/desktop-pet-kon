@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>鲸鱼娘桌宠</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="scene">
+    <div class="bubble" id="bubble" role="status"></div>
+
+    <div class="pet" id="pet" title="拖人家干嘛，哼">
+      <svg id="whale" class="whale" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-label="蓝色鲸鱼娘占位形象">
+        <defs>
+          <linearGradient id="gTail" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#63c8f7"/>
+            <stop offset="100%" stop-color="#2e86c1"/>
+          </linearGradient>
+          <linearGradient id="gBody" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#a9e3ff"/>
+            <stop offset="55%" stop-color="#66bff0"/>
+            <stop offset="100%" stop-color="#3f9bd6"/>
+          </linearGradient>
+          <linearGradient id="gBelly" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#ffffff"/>
+            <stop offset="100%" stop-color="#d9f2ff"/>
+          </linearGradient>
+          <linearGradient id="gHair" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#3a7ff0"/>
+            <stop offset="100%" stop-color="#1b3f96"/>
+          </linearGradient>
+          <linearGradient id="gFrill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#ffffff"/>
+            <stop offset="100%" stop-color="#dceeff"/>
+          </linearGradient>
+        </defs>
+
+        <!-- 鲸鱼尾鳍（在身体后面，像耳朵一样探出来） -->
+        <path id="tail" d="M140 80 C160 38 200 22 197 47 C195 62 174 71 171 92 C168 114 148 116 141 105 Z" fill="url(#gTail)"/>
+        <path d="M131 84 C134 50 160 24 169 33 C177 42 161 62 154 80 Z" fill="#2e86c1" opacity=".92"/>
+
+        <!-- 女仆装圆身 -->
+        <ellipse cx="100" cy="150" rx="48" ry="44" fill="url(#gBody)"/>
+        <ellipse cx="100" cy="157" rx="33" ry="34" fill="url(#gBelly)"/>
+        <path d="M63 132 q37 -9 74 0 l0 9 q-37 -9 -74 0 Z" fill="#ffffff" opacity=".9"/>
+        <path d="M85 118 q2 12 -1 22" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" opacity=".85" fill="none"/>
+        <path d="M115 118 q-2 12 1 22" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" opacity=".85" fill="none"/>
+
+        <!-- 手臂 -->
+        <ellipse cx="53" cy="152" rx="13" ry="17" transform="rotate(-14 53 152)" fill="#cbeaff"/>
+        <ellipse cx="147" cy="152" rx="13" ry="17" transform="rotate(14 147 152)" fill="#cbeaff"/>
+
+        <!-- 蓝色长发 -->
+        <path d="M100 16 C49 16 27 53 30 97 C32 127 42 145 52 151 C60 137 66 124 68 108 L74 54 L126 54 L132 108 C134 124 140 137 148 151 C158 145 168 127 170 97 C173 53 151 16 100 16 Z" fill="url(#gHair)"/>
+        <path d="M100 16 C76 16 60 30 53 51 C63 66 80 74 100 74 C120 74 137 66 147 51 C140 30 124 16 100 16 Z" fill="#2f6fdd"/>
+
+        <!-- 脸 -->
+        <ellipse cx="100" cy="93" rx="42" ry="37" fill="#e8f7ff"/>
+        <path d="M68 79 C73 75 81 75 86 79 C81 83 73 83 68 79 Z" fill="#ffffff"/>
+        <path d="M114 79 C119 75 127 75 132 79 C127 83 119 83 114 79 Z" fill="#ffffff"/>
+
+        <!-- 女仆头饰 -->
+        <path d="M90 60 q10 7 20 0" stroke="#ffffff" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+        <circle cx="82" cy="58" r="6" fill="#ffffff" opacity=".95"/>
+        <circle cx="118" cy="58" r="6" fill="#ffffff" opacity=".95"/>
+        <circle cx="76" cy="64" r="4.6" fill="url(#gFrill)"/>
+        <circle cx="86" cy="53" r="4.2" fill="url(#gFrill)"/>
+        <circle cx="114" cy="53" r="4.2" fill="url(#gFrill)"/>
+        <circle cx="124" cy="64" r="4.6" fill="url(#gFrill)"/>
+
+        <!-- 眼睛（带眨眼动画） -->
+        <ellipse cx="84" cy="93" rx="7.6" ry="9.4" fill="#123a63" class="eye"/>
+        <ellipse cx="116" cy="93" rx="7.6" ry="9.4" fill="#123a63" class="eye"/>
+        <circle cx="81.4" cy="89" r="2.9" fill="#ffffff"/>
+        <circle cx="113.4" cy="89" r="2.9" fill="#ffffff"/>
+        <circle cx="86.4" cy="96.5" r="1.5" fill="#9fdcff" opacity=".9"/>
+        <circle cx="118.4" cy="96.5" r="1.5" fill="#9fdcff" opacity=".9"/>
+        <ellipse cx="72" cy="102" rx="8" ry="5" fill="#ff9fbf" opacity=".5" class="blush"/>
+        <ellipse cx="128" cy="102" rx="8" ry="5" fill="#ff9fbf" opacity=".5" class="blush"/>
+        <path d="M94 104 q6 6 12 0" stroke="#2b5f8f" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+      </svg>
+      <div class="name">本鲸</div>
+      <div class="hint">按住拖我走 · 右键有菜单</div>
+    </div>
+
+    <div class="dbg" id="dbg">
+      <span class="k tl"></span><span class="k tr"></span><span class="k bl"></span><span class="k br"></span>
+      <span class="dbg-label">窗口边框 260 × 320</span>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
