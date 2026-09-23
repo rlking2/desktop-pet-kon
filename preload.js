@@ -7,4 +7,13 @@ contextBridge.exposeInMainWorld('pet', {
   onSay: (cb) => ipcRenderer.on('pet:say', (_e, text) => cb(text)),
   onAction: (cb) => ipcRenderer.on('pet:action', (_e, name) => cb(name)),
   onDebugOverlay: (cb) => ipcRenderer.on('pet:debug-overlay', (_e, on) => cb(on)),
+  onForceHit: (cb) => ipcRenderer.on('pet:pointer-hit-test', (_e, hit) => cb(hit)),
+
+  // 鼠标穿透
+  pointerHit: (hit) => ipcRenderer.send('pet:pointer-hit', { hit: !!hit }),
+
+  // 拖动（手动实现，因为 CSS drag 区域与逐像素穿透冲突）
+  getBounds: () => ipcRenderer.invoke('pet:get-bounds'),
+  dragStart: (payload) => ipcRenderer.send('pet:drag-start', payload),
+  dragEnd: () => ipcRenderer.send('pet:drag-end'),
 });

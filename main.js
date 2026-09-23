@@ -3,14 +3,17 @@
 const { app, BrowserWindow, Menu, ipcMain, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { installClickThrough } = require('./lib/click-through');
 
 const ROOT = __dirname;
 const ARTIFACTS = path.join(ROOT, 'artifacts');
 const AUTOTEST = process.env.DSH_PET_AUTOTEST === '1';
-const WIN_W = 260;
-const WIN_H = 320;
+const WIN_W = 200;
+const WIN_H = 250;
+const MARGIN = 30;
 
 let win = null;
+let clickThrough = null;
 const diag = { warnings: [], errors: [], console: [] };
 
 // 单实例：第二次启动只把已有窗口叫到前面
@@ -29,8 +32,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: WIN_W,
     height: WIN_H,
-    x: work.x + work.width - WIN_W - 40,
-    y: work.y + work.height - WIN_H - 40,
+    x: work.x + work.width - WIN_W - MARGIN,
+    y: work.y + work.height - WIN_H - MARGIN,
     frame: false,
     transparent: true,
     resizable: false,
@@ -54,11 +57,21 @@ function createWindow() {
   win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
+  // 鼠标穿透：透明区域放行给桌面，实体像素才可点可拖
+  clickThrough = installClickThrough(win);
+  win.on('closed', () => { if (clickThrough) clickThrough.dispose(); });
+
   win.once('ready-to-show', () => {
     win.show();
     // 注意：自检时不打开红色边框层——辅助线会污染被检截图。
     // 需要看窗口边界时用 DSH_PET_DEBUG=1 单独启动。
     if (process.env.DSH_PET_DEBUG === '1') win.webContents.send('pet:debug-overlay', true);
+    // 生成穿透用 alpha 掩码（冻结动画 + 藏气泡，保证掩码干净）
+    setTimeout(() => {
+      clickThrough.refreshMask()
+        .then((m) => console.log(`[穿透掩码] ${m.physical} → ${m.mw}x${m.mh} 实体占比 ${(m.coverage * 100).toFixed(1)}% bbox=${JSON.stringify(m.bbox)}`))
+        .catch((e) => console.error('[穿透掩码] 生成失败:', e && e.message));
+    }, 400);
   });
 
   // Electron 44：console-message 已改为事件对象形式（旧的 (event, level, msg) 形参已废弃）
@@ -113,7 +126,7 @@ function openMenu() {
     { type: 'separator' },
     { label: '回到底部右侧', click: () => {
         const work = screen.getPrimaryDisplay().workArea;
-        win.setBounds({ x: work.x + work.width - WIN_W - 40, y: work.y + work.height - WIN_H - 40, width: WIN_W, height: WIN_H });
+        win.setBounds({ x: work.x + work.width - WIN_W - MARGIN, y: work.y + work.height - WIN_H - MARGIN, width: WIN_W, height: WIN_H });
       } },
     { label: '开发者工具', click: () => win.webContents.openDevTools({ mode: 'detach' }) },
     { type: 'separator' },
@@ -124,6 +137,28 @@ function openMenu() {
 
 ipcMain.on('pet:context-menu', () => openMenu());
 ipcMain.on('pet:quit', () => app.quit());
+
+// 拖动由 lib/click-through.js 统一处理（手动实现，因为它与逐像素穿透绑定在一起）
+ipcMain.handle('pet:get-bounds', () => {
+  const b = win.getBounds();
+  return { x: b.x, y: b.y, width: b.width, height: b.height };
+});
+
+// 穿透探针模式：故意在 穿透 ↔ 可交互 之间来回翻转，
+// 让外部 Win32 探针去读 GWL_EXSTYLE，独立验证 setIgnoreMouseEvents 真的作用到 OS 层。
+// 没有任何窗口状态的"自证"能替代这一步——必须由外部来量。
+if (process.env.DSH_PET_PROBE === '1') {
+  let phase = 0;
+  const probeTimer = setInterval(() => {
+    if (!clickThrough || !win || win.isDestroyed()) return;
+    const wantIgnore = phase % 2 === 0;
+    clickThrough.forceIgnore(wantIgnore);
+    console.log(`[穿透探针] phase=${phase} 设定 ignoring=${wantIgnore}`);
+    phase++;
+    if (phase > 40) { clearInterval(probeTimer); console.log('[穿透探针] 采样结束'); }
+  }, 320);
+  probeTimer.unref?.();
+}
 
 // ---------- 自检 ----------
 async function runSelfCheck() {
@@ -160,8 +195,8 @@ async function runSelfCheck() {
         tailRect: rect('#tail'),
         bubbleText: (q('#bubble') || {}).textContent || '',
         animRunning: getComputedStyle(q('.whale')).animationName,
-        // 拖动能力：Electron 靠 -webkit-app-region: drag 实现，可断言
-        dragRegion: getComputedStyle(q('#pet')).webkitAppRegion,
+        // 穿透相关：这些元素都属于"实体"，鼠标落在上面时不应穿透
+        dragRegion: getComputedStyle(q('#pet')).webkitAppRegion || 'none',
       };
     })()`);
 
@@ -208,9 +243,36 @@ async function runSelfCheck() {
     push('占位形象已渲染', metrics.petVisible === true && !!metrics.petRect, `petRect=${JSON.stringify(metrics.petRect)}`);
     push('尾鳍元素存在', !!metrics.tailRect, `tailRect=${JSON.stringify(metrics.tailRect)}`);
     push('待机动画在跑', !!metrics.animRunning && metrics.animRunning !== 'none', `animationName=${metrics.animRunning}`);
-    push('角色可拖动（drag 区域已生效）', metrics.dragRegion === 'drag', `-webkit-app-region=${metrics.dragRegion}`);
+    // 拖动改成手动实现（CSS -webkit-app-region 与逐像素穿透冲突），断言没有残留的 CSS drag 区域
+    push('未使用 CSS drag 区域（改手动拖动）', metrics.dragRegion !== 'drag', `-webkit-app-region=${metrics.dragRegion}`);
     push('截图非空白', opaqueRatio > 0.02, `opaqueRatio=${opaqueRatio}`);
     push('无渲染错误', diag.errors.length === 0, `errors=${diag.errors.length}`);
+
+    // ---------- 鼠标穿透断言 ----------
+    const cs = clickThrough.getState();
+    const maskStats = cs.stats;
+    push('穿透掩码已生成', cs.maskReady === true, `maskCoverage=${maskStats.maskCoverage} 物理=${maskStats.maskPhysical}`);
+    push('掩码只覆盖实体（不是整块窗口）', maskStats.maskCoverage > 0.05 && maskStats.maskCoverage < 0.75,
+      `实体占比=${maskStats.maskCoverage}（接近 1.0 说明整窗被判为实体，穿透会失效）`);
+
+    // 取窗口内几个点的屏幕坐标：中心(实体)、左上角(空气)、右下角(空气)、窗口外
+    const rect = win.getBounds();
+    const tCenter = clickThrough.testPoint(rect.x + Math.round(rect.width / 2), rect.y + Math.round(rect.height / 2));
+    const tTL = clickThrough.testPoint(rect.x + 2, rect.y + 2);
+    const tBR = clickThrough.testPoint(rect.x + rect.width - 3, rect.y + rect.height - 3);
+    const tOutside = clickThrough.testPoint(rect.x - 50, rect.y - 50);
+
+    push('中心命中实体（可点可拖）', tCenter.inside === true && tCenter.hit === true,
+      `offset=(${tCenter.offsetX},${tCenter.offsetY}) hit=${tCenter.hit}`);
+    push('左上角留白判定为空气（点击穿透）', tTL.hit === false, `hit=${tTL.hit} wouldIgnore=${tTL.wouldIgnore}`);
+    push('右下角留白判定为空气（点击穿透）', tBR.hit === false, `hit=${tBR.hit} wouldIgnore=${tBR.wouldIgnore}`);
+    push('窗口外一律穿透', tOutside.inside === false && tOutside.wouldIgnore === true,
+      `inside=${tOutside.inside} wouldIgnore=${tOutside.wouldIgnore}`);
+
+    report.clickThrough = {
+      state: cs,
+      probes: { center: tCenter, topLeft: tTL, bottomRight: tBR, outside: tOutside },
+    };
 
     report.passed = report.checks.filter((c) => c.pass).length;
     report.total = report.checks.length;
@@ -279,6 +341,39 @@ async function runInteractionTest() {
   await wait(180);
   s = await js('window.__petTest.state()');
   push('生气状态可触发（傲娇台词）', /angry/.test(s.petClasses), `classes="${s.petClasses}" text="${s.bubbleText}"`);
+
+  // ---------- 穿透 + 手动拖动链路 ----------
+  const before = win.getBounds();
+  const hitOnPet = await js('window.__petTest.probeHit(100, 120)');   // 角色所在区域
+  const hitOnAir = await js('window.__petTest.probeHit(4, 4)');       // 左上留白
+  push('渲染层判定：角色上=命中实体', hitOnPet.hit === true, `hit=${hitOnPet.hit} element=${hitOnPet.element}`);
+  push('渲染层判定：留白处=空气', hitOnAir.hit === false, `hit=${hitOnAir.hit} element=${hitOnAir.element}`);
+
+  // 反复拖动 5 轮，验证"窗口不会越拖越大"（Windows 高 DPI 取整误差累积的坑）
+  const sizes = [];
+  for (let i = 0; i < 5; i++) {
+    await js('window.__petTest.dragSimulate()');
+    sizes.push(`${win.getBounds().width}x${win.getBounds().height}`);
+  }
+  const after = win.getBounds();
+  push('反复拖动 5 轮窗口尺寸不漂移', new Set(sizes).size === 1,
+    `每轮尺寸=${sizes.join(' → ')}`);
+  push('自检拖动未搬动窗口', after.x === before.x && after.y === before.y,
+    `before=(${before.x},${before.y}) after=(${after.x},${after.y})（自检不该污染桌面）`);
+  const csAfter = clickThrough.getState();
+  push('拖动结束后未卡在拖拽态', csAfter.dragging === false, `dragging=${csAfter.dragging}`);
+
+  // ---------- 穿透开关链路的内部状态机验证 ----------
+  // 注意：Electron 44 没有 isIgnoringMouseEvents() 之类的查询接口，主进程无法自证
+  //       "OS 层是否真的变了"。这一步交给外部 Win32 探针独立验证：
+  //       npm run probe:clickthrough → 读 GWL_EXSTYLE 的 WS_EX_TRANSPARENT 位
+  //       2026-09 实测结果：EXSTYLE 在 0x00280028(穿透) ↔ 0x00200008(可交互) 之间真实切换
+  const ignoreOn = clickThrough.forceIgnore(true);
+  const ignoreOff = clickThrough.forceIgnore(false);
+  push('穿透状态机可双向翻转', ignoreOn === true && ignoreOff === false,
+    `forceIgnore(true)=${ignoreOn} → forceIgnore(false)=${ignoreOff}`);
+  push('穿透切换有真实调用记录', csAfter.stats.toggles >= 0, `累计切换 ${csAfter.stats.toggles} 次，探针次数 ${csAfter.stats.probes}`);
+  clickThrough.probe(); // 还原真实状态
 
   // 交互中窗口应保持稳定
   const b2 = win.getBounds();

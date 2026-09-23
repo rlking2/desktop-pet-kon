@@ -49,6 +49,51 @@
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   let rice = 0;
 
+  // ---------- 鼠标穿透：实时上报鼠标是否落在"实体"上 ----------
+  // 用 elementFromPoint 判断，比数学掩码更贴合实际 DOM（SVG 透明区域不会误判为实体）
+  let lastHit = null;
+  let lastMoveAt = 0;
+  function reportHit(x, y) {
+    const now = performance.now();
+    if (now - lastMoveAt < 16) return; // 限到 ~60fps，省 IPC
+    lastMoveAt = now;
+    const el = document.elementFromPoint(x, y);
+    const hit = !!(el && pet.contains(el));
+    if (hit === lastHit) return;
+    lastHit = hit;
+    window.pet.pointerHit(hit);
+  }
+
+  window.addEventListener('mousemove', (e) => reportHit(e.clientX, e.clientY));
+  window.addEventListener('mouseleave', () => {
+    if (lastHit !== false) { lastHit = false; window.pet.pointerHit(false); }
+  });
+
+  // ---------- 手动拖动 ----------
+  let dragging = false;
+  pet.addEventListener('mousedown', async (e) => {
+    if (e.button !== 0 || e.detail > 1) return;
+    const bounds = await window.pet.getBounds();
+    dragging = true;
+    pet.classList.add('dragging');
+    window.pet.dragStart({
+      cursorX: Math.round(e.screenX),
+      cursorY: Math.round(e.screenY),
+      winX: bounds.x,
+      winY: bounds.y,
+    });
+    e.preventDefault();
+  });
+
+  const stopDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    pet.classList.remove('dragging');
+    window.pet.dragEnd();
+  };
+  window.addEventListener('mouseup', stopDrag);
+  window.addEventListener('blur', stopDrag);
+
   pet.addEventListener('click', () => {
     say(pick(CLICK_LINES));
     playAnim('hop', 520);
@@ -68,6 +113,8 @@
 
   window.pet.onSay((text) => say(text, 3000));
   window.pet.onDebugOverlay((on) => dbg.classList.toggle('on', !!on));
+  // 自检专用通道：直接下达穿透开关，用来验证 OS 层窗口状态
+  window.pet.onForceHit((hit) => { lastHit = hit; window.pet.pointerHit(hit); });
 
   window.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -76,7 +123,6 @@
 
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.pet.quit();
-    if (e.key.toLowerCase() === 'p') window.pet.onAction ? null : null;
   });
 
   // 自检用：把交互能力暴露成一个可调用入口，让人家能自动验证
@@ -86,10 +132,36 @@
       if (n === 'headpat') { say(pick(PAT_LINES)); playAnim('pat', 720); }
       if (n === 'angry') { say(pick(ANGRY_LINES)); playAnim('angry', 1300); }
     },
+    // 模拟鼠标移动，验证穿透上报逻辑
+    probeHit: (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      const hit = !!(el && pet.contains(el));
+      lastHit = hit;
+      window.pet.pointerHit(hit);
+      return { hit, element: el ? (el.tagName + (el.id ? '#' + el.id : '')) : null };
+    },
+    // 模拟拖动开始/结束，验证手动拖动链路。dryRun=true 时主进程只走链路、绝不搬动窗口，
+    // 避免自检把主人的桌宠挪到屏幕中间去。
+    dragSimulate: async () => {
+      const bounds = await window.pet.getBounds();
+      window.pet.dragStart({
+        cursorX: bounds.x + Math.round(bounds.width / 2),
+        cursorY: bounds.y + Math.round(bounds.height / 2),
+        winX: bounds.x,
+        winY: bounds.y,
+        winW: 200,
+        winH: 250,
+        dryRun: true,
+      });
+      await new Promise((r) => setTimeout(r, 120));
+      window.pet.dragEnd();
+      return { bounds, ok: true };
+    },
     state: () => ({
       petClasses: pet.className,
       bubbleShown: bubble.classList.contains('show'),
       bubbleText: bubble.textContent,
+      lastHit,
     }),
   };
 

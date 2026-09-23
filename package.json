@@ -2,11 +2,15 @@
   "name": "dsh-whale-pet",
   "version": "0.1.0",
   "private": true,
-  "description": "DSH 官方拟人化鲸鱼娘桌宠 —— 阶段0：透明无边框置顶窗口，能拖能跑",
+  "description": "DSH 官方拟人化鲸鱼娘桌宠 —— 透明无边框置顶 + 逐像素鼠标穿透 + 自动自检",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "autotest": "node scripts/autotest.js"
+    "start:debug": "node scripts/start-debug.js",
+    "autotest": "node scripts/autotest.js",
+    "inspect": "node scripts/inspect-image.js",
+    "probe:clickthrough": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probe-clickthrough.ps1",
+    "verify": "npm run autotest && npm run inspect"
   },
   "author": "",
   "license": "MIT",
