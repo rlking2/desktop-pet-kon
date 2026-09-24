@@ -100,26 +100,29 @@
   }
 
   // ---------- 待办面板 ----------
-  // 需求：左键点击桌宠 → 展开待办面板。顶部输入栏，下方两列网格，默认容量 5 栏；
-  //       每栏左侧一个小方框，点击即"完成并删除该栏"。
-  const MEMO_CAP = 5;
+  // 需求：左键点击桌宠 → 展开待办面板。顶部输入栏，下方两列网格，**默认可见 5 栏**；
+  //       每个栏位左侧一个小方框，点击即"完成并删除该栏"。
+  //       任务超过 5 条时，**网格区域自动变可滚动**（面板尺寸不变，避免窗口跟着抖）。
+  const MEMO_VISIBLE = 5;   // 默认可见栏数（2 列 × 3 行 = 6 格，第 6 格是空槽）
   const MEMO_KEY = 'desktopPet.memo.tasks';
   const memoEl = document.getElementById('memo');
   const memoList = document.getElementById('memoList');
+  const memoScroll = document.getElementById('memoScroll');
   const memoInput = document.getElementById('memoInput');
   const memoCountEl = document.getElementById('memoCount');
   const memoCapEl = document.getElementById('memoCap');
   const memoFoot = document.getElementById('memoFoot');
   const memoClose = document.getElementById('memoClose');
-  if (memoCapEl) memoCapEl.textContent = String(MEMO_CAP);
+  if (memoCapEl) memoCapEl.textContent = String(MEMO_VISIBLE);
 
-  const memoState = { open: false, tasks: [], renders: 0, removed: 0, added: 0, opens: 0, closes: 0 };
+  const memoState = { open: false, tasks: [], renders: 0, removed: 0, added: 0, opens: 0, closes: 0, scrollable: false };
 
   function loadTasks() {
     try {
       const raw = localStorage.getItem(MEMO_KEY);
       const arr = raw ? JSON.parse(raw) : [];
-      memoState.tasks = Array.isArray(arr) ? arr.filter((t) => t && typeof t.text === 'string').slice(0, MEMO_CAP) : [];
+      // 不再限制条数：超过可见栏数时靠滚动查看
+      memoState.tasks = Array.isArray(arr) ? arr.filter((t) => t && typeof t.text === 'string') : [];
     } catch { memoState.tasks = []; }
   }
   function saveTasks() {
@@ -130,10 +133,11 @@
   function renderMemo() {
     if (!memoList) return;
     memoState.renders++;
-    // 防御：任何路径把任务数撑过容量时，以容量为准（列表只显示前 5 条）
-    if (memoState.tasks.length > MEMO_CAP) memoState.tasks = memoState.tasks.slice(0, MEMO_CAP);
     memoList.innerHTML = '';
-    for (let i = 0; i < MEMO_CAP; i++) {
+    const taskCount = memoState.tasks.length;
+    // 槽位数：至少撑满"默认可见 5 栏"，奇数条时补一个空槽凑齐两列
+    const slots = Math.max(MEMO_VISIBLE + (taskCount >= MEMO_VISIBLE ? 1 : 0), taskCount + (taskCount % 2));
+    for (let i = 0; i < slots; i++) {
       const task = memoState.tasks[i];
       const row = document.createElement('div');
       row.className = 'memo-item' + (task ? '' : ' empty');
@@ -156,23 +160,35 @@
       row.appendChild(span);
       memoList.appendChild(row);
     }
-    if (memoCountEl) memoCountEl.textContent = String(memoState.tasks.length);
-    const left = MEMO_CAP - memoState.tasks.length;
-    setFoot(left > 0 ? `还可以添加 ${left} 条` : '已满 5 条，勾选左方框即可完成并删除');
+    if (memoCountEl) memoCountEl.textContent = String(taskCount);
+
+    // 是否出现滚动条：用真实布局数据判断（比算公式可靠）
+    const sc = memoScroll || memoList; // 滚动发生在外层容器上，不是 grid 本身
+    const scrollable = sc.scrollHeight > sc.clientHeight + 1;
+    memoState.scrollable = scrollable;
+    if (memoEl) memoEl.classList.toggle('scrollable', scrollable);
+
+    const left = Math.max(0, MEMO_VISIBLE - taskCount);
+    if (scrollable) {
+      setFoot(`共 ${taskCount} 条 · 向上滚动查看更多`);
+    } else if (left > 0) {
+      setFoot(`还可以添加 ${left} 条`);
+    } else {
+      setFoot('满 5 条后继续添加会自动滚动');
+    }
+    return { slots, scrollable };
   }
 
   function addTask(text) {
     const t = String(text || '').trim();
     if (!t) return false;
-    if (memoState.tasks.length >= MEMO_CAP) {
-      setFoot('已满 5 条，先勾掉一条再添加');
-      return false;
-    }
     memoState.tasks.push({ text: t, createdAt: Date.now() });
     memoState.added++;
     saveTasks();
-    renderMemo();
-    setFoot('已添加');
+    const r = renderMemo();
+    // 新任务如果落在滚动区之外，自动滚到底让主人看见
+    if (memoScroll && r && r.scrollable) memoScroll.scrollTop = memoScroll.scrollHeight;
+    setFoot(r && r.scrollable ? `已添加 · 共 ${memoState.tasks.length} 条` : '已添加');
     return true;
   }
 
@@ -213,7 +229,7 @@
     // 让键盘焦点落到输入框（面板要能打字），同时把窗口提到可交互层
     try { window.pet.focusWindow(); } catch { /* 忽略 */ }
     setTimeout(() => { if (memoInput) memoInput.focus(); }, 120);
-    dlog('memo', `面板展开，当前 ${memoState.tasks.length}/${MEMO_CAP} 条`);
+    dlog('memo', `面板展开，当前 ${memoState.tasks.length} 条（默认可见 ${MEMO_VISIBLE} 栏，超出滚动）`);
     return true;
   }
 
@@ -567,12 +583,19 @@
     const boxes = memoList ? memoList.querySelectorAll('.memo-box') : [];
     return {
       open: memoState.open,
-      cap: MEMO_CAP,
+      cap: MEMO_VISIBLE,           // 默认可见栏数（不再是硬上限）
+      visible: MEMO_VISIBLE,
       count: memoState.tasks.length,
       tasks: memoState.tasks.map((t) => t.text),
       renderedRows: rows.length,
       emptyRows: emptyRows.length,
       boxCount: boxes.length,
+      // 滚动状态
+      scrollable: !!memoState.scrollable,
+      scrollHeight: memoScroll ? memoScroll.scrollHeight : 0,
+      clientHeight: memoScroll ? memoScroll.clientHeight : 0,
+      scrollTop: memoScroll ? Math.round(memoScroll.scrollTop) : 0,
+      maxScroll: memoScroll ? Math.max(0, memoScroll.scrollHeight - memoScroll.clientHeight) : 0,
       // 输入框是否真的能被键盘输入
       inputFocused: !!(memoInput && document.activeElement === memoInput),
       inputValue: memoInput ? memoInput.value : null,
@@ -679,8 +702,23 @@
     memoToggle: () => { toggleMemo(); return memoSnapshot(); },
     memoAdd: (text) => ({ ...memoSnapshot(), added: addTask(text) }),
     memoComplete: (index) => ({ ...memoSnapshot(), started: completeTask(index) }),
+    // 同步删除（自检用）：真实 completeTask 有 220ms 删除线反馈动画，
+    // 测试里连续调用会互相打架（任务在中途就被删空），所以留一条同步通道。
+    memoCompleteNow: (index) => {
+      const t = memoState.tasks[index];
+      if (!t) return { ...memoSnapshot(), started: false };
+      memoState.tasks.splice(index, 1);
+      memoState.removed++;
+      saveTasks();
+      renderMemo();
+      return { ...memoSnapshot(), started: true };
+    },
     memoClear: () => { memoState.tasks = []; saveTasks(); renderMemo(); return memoSnapshot(); },
     memoSnapshot,
+    memoScrollTo: (top) => {
+      if (memoScroll) { memoScroll.scrollTop = top; }
+      return memoSnapshot();
+    },
     state: () => ({
       petClasses: pet.className,
       bubbleShown: bubble.classList.contains('show'),

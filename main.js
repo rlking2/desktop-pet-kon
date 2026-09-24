@@ -605,19 +605,60 @@ async function runSelfCheck() {
         `渲染栏位=${afterDone.renderedRows} 空栏位=${afterDone.emptyRows}`);
 
       // 容量上限
-      // 容量上限：已有 2 条，容量 5 → 还能进 3 条，第 4 次起必须被拒
-      const beforeSnap = await js('window.__petTest.memoSnapshot()');
-      const MEMO_ROOM = Math.max(0, beforeSnap.cap - beforeSnap.count);
+      // 超过默认 5 栏 → 不再拒绝，改为列表区域出现滚动
+      const beforeFill = await js('window.__petTest.memoSnapshot()');
       const fill = await js(`(() => {
         const r = [];
-        for (let i = 0; i < 6; i++) r.push(window.__petTest.memoAdd('溢出测试' + i).added);
+        for (let i = 0; i < 12; i++) r.push(window.__petTest.memoAdd('溢出测试' + i).added);
         return r;
       })()`);
-      await wait(150);
+      await wait(250);
       const full = await js('window.__petTest.memoSnapshot()');
-      const okCount = fill.filter((v) => v === true).length; // 注意：必须是严格 true 判定，元素是布尔值
-      push('超过 5 条时拒绝并提示', full.count === 5 && okCount === MEMO_ROOM,
-        `添加前 ${beforeSnap.count} 条 + 容量 ${beforeSnap.cap} → 应再接受 ${MEMO_ROOM} 条；6 次添加实际成功 ${okCount} 次；现 ${full.count}/5；提示="${full.foot}"`);
+      const okCount = fill.filter((v) => v === true).length;
+      push('超过 5 条时全部接受（不再硬拒绝）', okCount === 12 && full.count === beforeFill.count + 12,
+        `12 次添加全部成功（${okCount}/12），任务数 ${beforeFill.count} → ${full.count}`);
+      // 说明：两列布局下，8 条只排 4 行（103px）装得进 130px 容器，所以不会滚动；
+      // 真正触发滚动需要行数超过 5 行，即 11 条以上。
+      push('任务多到超过 5 行后列表自动可滚动', full.scrollable === true && full.maxScroll > 0,
+        `任务数=${full.count} scrollable=${full.scrollable} 内容高=${full.scrollHeight} 可视高=${full.clientHeight} 可滚动距离=${full.maxScroll}px`);
+      push('滚动区可视高度固定为 5 栏高度', full.clientHeight === 130,
+        `可视高度=${full.clientHeight}px（5 行 × 22px + 4 × 5px 间距 = 130px）`);
+
+      // 滚动后能露出后面的任务（注意量的是外层滚动容器 #memoScroll，不是内层网格）
+      const scrolled = await js('window.__petTest.memoScrollTo(99999)');
+      await wait(120);
+      const tailVisible = await js(`(() => {
+        const wrap = document.getElementById('memoScroll');
+        const items = wrap.querySelectorAll('.memo-item:not(.empty)');
+        const lastEl = items[items.length - 1];
+        if (!lastEl) return null;
+        const r = lastEl.getBoundingClientRect(), c = wrap.getBoundingClientRect();
+        return { text: lastEl.textContent.trim(), visible: r.bottom <= c.bottom + 1 && r.top >= c.top - 1,
+                 scrollTop: Math.round(wrap.scrollTop), maxScroll: wrap.scrollHeight - wrap.clientHeight };
+      })()`);
+      push('滚动到底能看见最后一条任务',
+        tailVisible && tailVisible.visible === true && tailVisible.scrollTop > 0 &&
+        tailVisible.scrollTop === tailVisible.maxScroll,
+        `最后一条="${tailVisible && tailVisible.text}" 完整可见=${tailVisible && tailVisible.visible} ` +
+        `scrollTop=${tailVisible && tailVisible.scrollTop}/${tailVisible && tailVisible.maxScroll}`);
+      push('添加新任务时自动滚动到底（新条可见）',
+        scrolled.scrollTop > 0 && scrolled.scrollTop === scrolled.maxScroll,
+        `添加后 scrollTop=${scrolled.scrollTop} / maxScroll=${scrolled.maxScroll}`);
+
+      // 删除到 5 条 → 滚动条应消失（回到"默认装 5 栏"的样子）
+      // 注意用同步删除：真实删除带 220ms 删除线动画，循环调用会互相打架
+      const shrink = await js(`(() => {
+        let guard = 0;
+        while (window.__petTest.memoSnapshot().count > 5 && guard++ < 60) window.__petTest.memoCompleteNow(0);
+        return window.__petTest.memoSnapshot();
+      })()`);
+      await wait(300);
+      const afterShrink = await js('window.__petTest.memoSnapshot()');
+      push('删到 5 条后滚动条消失（回到默认 5 栏）',
+        afterShrink.count === 5 && afterShrink.scrollable === false && afterShrink.maxScroll === 0,
+        `任务数=${afterShrink.count} scrollable=${afterShrink.scrollable} maxScroll=${afterShrink.maxScroll} 渲染栏位=${afterShrink.renderedRows}`);
+      push('5 条时正好占满可见区（不用滚动）', afterShrink.renderedRows >= 5 && afterShrink.clientHeight === 130,
+        `渲染栏位=${afterShrink.renderedRows}（5 条 + 空槽）可视高=${afterShrink.clientHeight}px`);
 
       // 收起面板：窗口应还原尺寸
       const boundsBeforeClose = win.getBounds();
