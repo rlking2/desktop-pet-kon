@@ -13,26 +13,28 @@ html, body {
 
 /* 场景布局：用 grid 固定列宽，位置完全确定，
    不用 flex —— flex 的"拉伸/收缩"会让桌宠在窗口变宽时漂移（实测 810 → 1066）。
-   收起态：单列 158px（桌宠宽度 + 边距），靠窗口右边缘。
-   展开态：两列 [面板 300px][桌宠 158px]，桌宠仍在最右列 → 屏幕位置恒定不变。 */
+   收起态：单列 = 素材显示宽度 + 边距，靠窗口右边缘。
+   展开态：两列 [面板 300px][桌宠列]，桌宠仍在最右列 → 屏幕位置恒定不变。
+   --sprite-w 由渲染层按素材真实宽高比设置（竖构图素材 → 列更窄）。 */
 .scene {
+  --sprite-w: 130px;
   position: relative;
   width: 100vw;
   height: 100vh;
   display: grid;
-  grid-template-columns: 158px;          /* 只有桌宠一列 */
+  grid-template-columns: calc(var(--sprite-w) + 28px);
   justify-content: end;                   /* 整体靠右：桌宠贴住窗口右边缘 */
   align-items: end;
 }
 .scene.memo-open {
-  grid-template-columns: 300px 158px;     /* 面板在左，桌宠仍在最右列 → 她不动 */
+  grid-template-columns: 300px calc(var(--sprite-w) + 28px);
   grid-template-areas: "memo pet";
 }
 .scene.memo-open .memo { grid-area: memo; }
 .scene.memo-open .pet { grid-area: pet; }
 /* 面板放右侧（左边放不下时才会走到这里）：桌宠换到最左列 */
 .scene.memo-open.panel-right {
-  grid-template-columns: 158px 300px;
+  grid-template-columns: calc(var(--sprite-w) + 28px) 300px;
   grid-template-areas: "pet memo";
   justify-content: start;
 }
@@ -236,10 +238,11 @@ html, body {
 
 /* ---------- 角色容器 ---------- */
 .pet {
+  --sprite-w: 130px;
+  --sprite-h: 130px;
   position: relative;
-  width: 130px;
-  height: 150px;
-  min-width: 130px;
+  width: var(--sprite-w);
+  min-width: var(--sprite-w);
   justify-self: center;
   align-self: end;
   margin: 12px 16px 16px 12px;
@@ -252,11 +255,11 @@ html, body {
 }
 .pet.dragging { cursor: grabbing; }
 
-/* 角色本体画布：所有形象都画在这里（帧动画 / 空位提示） */
+/* 角色本体画布：尺寸由渲染层按素材真实宽高比设置（竖构图素材 → 竖矩形显示区） */
 .sprite {
   display: block;
-  width: 130px;
-  height: 130px;
+  width: var(--sprite-w);
+  height: var(--sprite-h);
 }
 
 /* ---------- 提示文字（名牌已按主人要求移除） ---------- */

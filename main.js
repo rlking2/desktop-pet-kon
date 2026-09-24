@@ -12,14 +12,13 @@ const AUTOTEST = process.env.DSH_PET_AUTOTEST === '1';
 const WIN_W = 200;
 const WIN_H = 250;
 const MARGIN = 30;
-// 待办面板：展开时把窗口**横向**扩展，面板出现在桌宠旁边（优先左侧，因为桌宠默认靠窗口右边）。
-//
+// 待办面板展开时，窗口要向左扩展出"面板列 + 桌宠列"。
+// 桌宠列宽度取决于**素材的真实宽高比**（竖构图素材列更窄），由渲染层回报，所以这里是兜底值。
 // 三个必须守住的点（都是踩坑换来的）：
-//   1) **桌宠的屏幕位置绝对不动** —— 主人点的是她，她就该待在那儿；动的是窗口边界和面板
-//   2) 窗口尺寸**必须真的变，且要够宽** —— 288px 的面板塞进 200px 的窗口会被裁掉；
-//      给 320px 也不够，因为 288 + 桌宠 130 会触发 flex 压缩 → 实测面板被压到 280 还溢出
+//   1) **桌宠的屏幕位置绝对不动** —— 主人点的是它，它就该待在那儿；动的是窗口边界和面板
+//   2) 窗口尺寸**必须真的变，且要够宽** —— 288px 的面板塞进 200px 的窗口会被裁掉
 //   3) 改尺寸后**必须重算穿透掩码**，否则点击判定范围还停留在旧尺寸上
-const PANEL_W = 470;   // 面板列 300 + 桌宠列 158 + 余量 = 470（见 style.css 的 grid 列定义）
+let panelWinW = 470;
 const PANEL_H = 250;   // 与收起态同高（人物位置天然不变）
 let panelOpen = false;
 let panelSide = null;
@@ -374,7 +373,7 @@ ipcMain.on('pet:set-panel', (_e, payload) => {
 
   let target;
   if (open) {
-    const need = PANEL_W;
+    const need = panelWinW;   // 由渲染层按素材宽高比回报（见 pet:set-content-ratio）
     const h = PANEL_H; // 展开态固定高度（= 收起态设计高度），保证人物位置不变
     // 优先放右侧（窗口左边不动 → 桌宠位置完全不变）
     const spaceRight = work.x + work.width - (b.x + b.width);
@@ -425,6 +424,23 @@ ipcMain.on('pet:focus-window', () => {
   win.focus();
   win.webContents.focus();
 });
+// 素材形状回报：渲染层量出"最宽那一帧"的宽高比后告诉主进程，
+// 主进程据此决定：
+//   1) 桌宠列宽度 = 显示宽度 + 边距（竖构图素材列更窄，窗口就能小一点）
+//   2) 面板展开时的窗口宽度 = 面板列 + 桌宠列
+// 为什么不让主进程自己算：帧尺寸信息在 manifest 里，但"显示框"是渲染层的事
+// （CSS 尺寸 + DPR 缩放），由渲染层回报最准。
+ipcMain.on('pet:set-content-ratio', (_e, payload) => {
+  const ratio = payload && Number(payload.ratio);
+  if (!ratio || !Number.isFinite(ratio) || ratio <= 0) return;
+  // 显示高度固定 200px（竖构图），宽度按素材比例算，并夹在合理范围
+  const dispW = Math.max(60, Math.min(200, Math.round(200 * ratio)));
+  const column = dispW + 26;               // 左右边距 12 + 16（见 style.css）
+  panelWinW = 300 + column + 4;
+  logInput({ src: 'main', type: 'content-ratio',
+    detail: `素材宽高比 ${ratio.toFixed(3)} → 显示 ${dispW}x200，桌宠列 ${column}，面板态窗口宽 ${panelWinW}` });
+});
+
 // 形象变化后重算穿透掩码（渲染层加载完帧动画会请求一次）
 ipcMain.on('pet:refresh-mask', () => {
   if (!clickThrough) return;
@@ -539,8 +555,21 @@ async function runSelfCheck() {
     push('完整落在工作区内', state.insideWorkArea === true, `bounds=${JSON.stringify(b)} workArea=${JSON.stringify(display.workArea)}`);
     push('透明背景（body 非纯色）', /rgba\(0, 0, 0, 0\)|transparent/.test(metrics.bodyBg), `bodyBg=${metrics.bodyBg}`);
     push('角色容器已渲染', metrics.petVisible === true && !!metrics.petRect, `petRect=${JSON.stringify(metrics.petRect)}`);
-    push('角色画布存在且尺寸正确', metrics.canvasSize === '130x130' && !!metrics.spriteRect,
+    push('角色画布存在', !!metrics.spriteRect && !!metrics.canvasSize,
       `canvas=${metrics.canvasSize} spriteRect=${JSON.stringify(metrics.spriteRect)}`);
+    // 显示框应该**贴合素材真实宽高比**（竖构图素材 → 竖矩形，人物更大更清晰）
+    {
+      const sp0 = metrics.sprite || {};
+      if (sp0.available && sp0.display) {
+        const ratioOk = Math.abs(sp0.display.ratio - (sp0.display.w / sp0.display.h)) < 0.02;
+        push('显示框贴合素材宽高比（竖矩形）',
+          sp0.display.h === 200 && sp0.display.w >= 60 && sp0.display.w <= 200 && ratioOk,
+          `显示框 ${sp0.display.w}x${sp0.display.h}  素材比例 ${sp0.display.ratio}`);
+      } else {
+        push('空位提示模式下显示框为正方形（无素材可贴合）',
+          metrics.canvasSize === '130x130', `canvas=${metrics.canvasSize}`);
+      }
+    }
     // 角色渲染状态：有素材在播帧动画，没素材画"空位提示"。两条路都必须真的画出东西
     // （否则整个窗口都是空气 → 鼠标事件进不来 → 点击/拖动/穿透全部失效）
     {

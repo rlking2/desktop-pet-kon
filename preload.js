@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('pet', {
   getAssetManifest: () => ipcRenderer.invoke('pet:asset-manifest'),
   // 形象变了要重算穿透掩码（否则点击判定范围跟角色对不上）
   refreshMask: () => ipcRenderer.send('pet:refresh-mask'),
+  // 回报素材宽高比：主进程据此算桌宠列宽度与面板态窗口宽度（竖构图素材列更窄）
+  setContentRatio: (ratio) => ipcRenderer.send('pet:set-content-ratio', { ratio }),
 
   // 待办面板：展开时需要更宽的窗口（并重算穿透掩码），收起时还原
   setPanel: (open) => ipcRenderer.send('pet:set-panel', { open: !!open }),

@@ -392,8 +392,12 @@
   // ---------- 角色渲染：帧动画 / 空位提示 ----------
   const canvas = document.getElementById('sprite');
   const ctx = canvas ? canvas.getContext('2d') : null;
-  const CW = canvas ? canvas.width : 130;
-  const CH = canvas ? canvas.height : 130;
+  // 显示框尺寸由"素材真实宽高比"决定（竖构图素材 → 竖矩形显示区，人物更大更清晰）。
+  // 主人在 2026-09 明确要求"改成贴合图片的竖矩形"，所以这里不再写死正方形。
+  const DISP_H = 200;                 // 显示高度固定 200（窗口高度够）
+  const DISP_W_MAX = 200;             // 兜底上限
+  let CW = canvas ? canvas.width : 130;
+  let CH = canvas ? canvas.height : 130;
   const spriteGroups = {};
   const spriteState = {
     available: false, reason: '未加载', groups: [], baseGroup: null,
@@ -550,6 +554,28 @@
       spriteState.reason = '所有动作的帧都没能加载';
       dlog('sprite-init', spriteState.reason);
       return;
+    }
+
+    // ★ 按素材真实宽高比设定显示框（取所有帧里"最宽"的那一帧，保证谁也裁不到）
+    let maxRatio = 0, maxW = 0, maxH = 0;
+    for (const g of Object.values(spriteGroups)) {
+      for (const im of g.images) {
+        if (!im || !im.naturalWidth) continue;
+        const r = im.naturalWidth / im.naturalHeight;
+        if (r > maxRatio) { maxRatio = r; maxW = im.naturalWidth; maxH = im.naturalHeight; }
+      }
+    }
+    if (maxRatio > 0) {
+      CW = Math.max(60, Math.min(DISP_W_MAX, Math.round(DISP_H * maxRatio)));
+      CH = DISP_H;
+      if (canvas) { canvas.width = CW; canvas.height = CH; }
+      const cssW = CW + 'px', cssH = CH + 'px';
+      canvas.style.width = cssW; canvas.style.height = cssH;
+      pet.style.setProperty('--sprite-w', cssW);
+      pet.style.setProperty('--sprite-h', cssH);
+      spriteState.display = { w: CW, h: CH, ratio: +maxRatio.toFixed(3) };
+      try { window.pet.setContentRatio(maxRatio); } catch { /* 忽略 */ }
+      dlog('sprite-init', `显示框按素材比例设为 ${CW}x${CH}（最大帧 ${maxW}x${maxH}，比例 ${maxRatio.toFixed(3)}）`);
     }
     const primary = spriteGroups.idle ? 'idle' : names[0];
     spriteState.groups = names;
@@ -750,7 +776,8 @@
         activeGroup: spriteState.activeGroup,
         activeFrame: spriteState.activeFrame,
         drewFrames: spriteState.drewFrames,
-        canvasSize: `${CW}x${CH}`,
+        canvasSize: CW + 'x' + CH,
+        display: spriteState.display || null,
         timeline: spriteTimeline ? { group: spriteTimeline.group, loop: spriteTimeline.loop } : null,
       },
     }),
