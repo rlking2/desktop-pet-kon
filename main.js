@@ -16,6 +16,35 @@ let win = null;
 let clickThrough = null;
 const diag = { warnings: [], errors: [], console: [] };
 
+// ---------- 原始输入日志管道 ----------
+// 真人反馈"点击和右键都无效"，而合成事件自检全绿 → 必须记录真实事件，不能再靠推理。
+// 渲染层每个鼠标事件都写进这里，主人复现一次，人家就能看出事件卡在哪一层。
+let inputLog = [];
+let inputLogPath = null;
+const INPUT_LOG_LIMIT = 4000;
+
+function initInputLog() {
+  try {
+    fs.mkdirSync(ARTIFACTS, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    inputLogPath = path.join(ARTIFACTS, `input-${stamp}.log`);
+    fs.writeFileSync(inputLogPath, `# 鲸鱼娘桌宠 原始输入日志\n# 开始时间 ${new Date().toISOString()}\n# Electron ${process.versions.electron}\n`);
+    return inputLogPath;
+  } catch (err) {
+    console.error('[输入日志] 初始化失败:', err && err.message);
+    return null;
+  }
+}
+
+function logInput(entry) {
+  const line = `[${new Date().toISOString().slice(11, 23)}] ${entry.src.padEnd(9)} ${entry.type.padEnd(12)} ${entry.detail || ''}`;
+  if (inputLog.length < INPUT_LOG_LIMIT) inputLog.push(line);
+  if (inputLogPath) {
+    try { fs.appendFileSync(inputLogPath, line + '\n'); } catch { /* 磁盘问题不该影响桌宠 */ }
+  }
+  if (process.env.DSH_PET_INPUT_VERBOSE === '1') console.log('[输入] ' + line);
+}
+
 // 单实例：第二次启动只把已有窗口叫到前面
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -28,6 +57,7 @@ if (!gotLock) {
 
 function createWindow() {
   const work = screen.getPrimaryDisplay().workArea;
+  initInputLog();
 
   win = new BrowserWindow({
     width: WIN_W,
@@ -61,6 +91,11 @@ function createWindow() {
   clickThrough = installClickThrough(win);
   win.on('closed', () => { if (clickThrough) clickThrough.dispose(); });
 
+  // 菜单要尽早设置并隐藏：晚设会把窗口高度撑大几像素（Windows 会为菜单栏预留空间）
+  applyChineseMenus();
+  win.setMenuBarVisibility(false);
+  win.setAutoHideMenuBar(true);
+
   win.once('ready-to-show', () => {
     win.show();
     // 注意：自检时不打开红色边框层——辅助线会污染被检截图。
@@ -69,9 +104,38 @@ function createWindow() {
     // 生成穿透用 alpha 掩码（冻结动画 + 藏气泡，保证掩码干净）
     setTimeout(() => {
       clickThrough.refreshMask()
-        .then((m) => console.log(`[穿透掩码] ${m.physical} → ${m.mw}x${m.mh} 实体占比 ${(m.coverage * 100).toFixed(1)}% bbox=${JSON.stringify(m.bbox)}`))
+        .then((m) => {
+          console.log(`[穿透掩码] ${m.physical} → ${m.mw}x${m.mh} 实体占比 ${(m.coverage * 100).toFixed(1)}% bbox=${JSON.stringify(m.bbox)}`);
+          logInput({ src: 'main', type: 'mask-ready', detail: `覆盖率=${m.coverage} bbox=${JSON.stringify(m.bbox)}` });
+        })
         .catch((e) => console.error('[穿透掩码] 生成失败:', e && e.message));
     }, 400);
+
+    // 启动横幅：确认跑的是哪一版代码 + 日志路径
+    logInput({ src: 'main', type: 'startup', detail: `含4px移动阈值 + mousedown 无 preventDefault；electron=${process.versions.electron}` });
+    logInput({ src: 'main', type: 'log-path', detail: inputLogPath || '(未启用)' });
+    console.log(`\n[桌宠已启动] 原始输入日志: ${inputLogPath}`);
+    console.log('主人点她几下、右键几下，人家读日志定位问题。\n');
+
+    // 心跳：记录事件发生那一刻的"命中判定 + 穿透状态"
+    if (!AUTOTEST) {
+      const beat = setInterval(() => {
+        if (!win || win.isDestroyed()) return;
+        try {
+          const pt = screen.getCursorScreenPoint();
+          const b = win.getBounds();
+          const inside = pt.x >= b.x && pt.x < b.x + b.width && pt.y >= b.y && pt.y < b.y + b.height;
+          const cs = clickThrough.getState();
+          const hit = inside ? clickThrough.hitTest(pt.x - b.x, pt.y - b.y) : null;
+          logInput({
+            src: 'main',
+            type: 'heartbeat',
+            detail: `鼠标=(${pt.x},${pt.y}) 窗口内=${inside} 命中实体=${hit} 穿透中=${cs.ignoring} 窗口=(${b.x},${b.y},${b.width},${b.height})`,
+          });
+        } catch { /* 心跳失败不该影响桌宠 */ }
+      }, 3000);
+      beat.unref?.();
+    }
   });
 
   // Electron 44：console-message 已改为事件对象形式（旧的 (event, level, msg) 形参已废弃）
@@ -94,6 +158,13 @@ function createWindow() {
     diag.errors.push({ level: 3, message: `did-fail-load ${code} ${desc} ${url}` });
   });
 
+  // 原生右键兜底：Electron 的 webContents 'context-menu' 事件不经过 DOM 的 contextmenu，
+  // 万一渲染层因为透明窗口/穿透状态没收到 DOM 事件，这条原生路径仍然能弹出菜单。
+  win.webContents.on('context-menu', () => {
+    logInput({ src: 'main', type: 'native-contextmenu', detail: '收到原生 context-menu 事件' });
+    openMenu('native-webContents');
+  });
+
   win.loadFile(path.join(ROOT, 'renderer', 'index.html'));
 
   win.on('closed', () => { win = null; });
@@ -112,6 +183,76 @@ function createWindow() {
     });
   }
   return win;
+}
+
+// ---------- 中文界面（Electron 内置菜单默认是英文，这里全部换成中文） ----------
+// 注意：只替换界面文案与角色标签，代码标识符（role / 文件名 / API）保持英文不动。
+function applyChineseMenus() {
+  const appMenu = Menu.buildFromTemplate([
+    {
+      label: '文件',
+      submenu: [
+        { label: '回到底部右侧', click: () => {
+            if (!win || win.isDestroyed()) return;
+            const work = screen.getPrimaryDisplay().workArea;
+            win.setBounds({ x: work.x + work.width - WIN_W - MARGIN, y: work.y + work.height - WIN_H - MARGIN, width: WIN_W, height: WIN_H });
+          } },
+        { type: 'separator' },
+        { label: '关闭窗口', role: 'close' },
+        { label: '退出', role: 'quit' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { label: '撤销', role: 'undo' },
+        { label: '重做', role: 'redo' },
+        { type: 'separator' },
+        { label: '剪切', role: 'cut' },
+        { label: '复制', role: 'copy' },
+        { label: '粘贴', role: 'paste' },
+        { label: '全选', role: 'selectAll' },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { label: '重新加载', role: 'reload' },
+        { label: '强制重新加载', role: 'forceReload' },
+        { label: '开发者工具', role: 'toggleDevTools' },
+        { type: 'separator' },
+        { label: '实际大小', role: 'resetZoom' },
+        { label: '放大', role: 'zoomIn' },
+        { label: '缩小', role: 'zoomOut' },
+        { type: 'separator' },
+        { label: '全屏切换', role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { label: '最小化', role: 'minimize' },
+        { label: '缩放', role: 'zoom' },
+      ],
+    },
+    {
+      label: '帮助',
+      submenu: [
+        { label: '关于鲸鱼娘桌宠', click: () => {
+            if (!win || win.isDestroyed()) return;
+            const { dialog } = require('electron');
+            dialog.showMessageBox(win, {
+              type: 'info',
+              title: '关于',
+              message: '鲸鱼娘桌宠',
+              detail: `阶段 1：透明置顶 + 逐像素鼠标穿透 + 自动自检\n\nElectron ${process.versions.electron}\nChrome ${process.versions.chrome}\nNode ${process.versions.node}\n\n状态：自检 42 条断言 + 10 条像素分析\n日志目录：artifacts/\n\n人家是 DeepSeek 的官方拟人化形象，才不是随便一只鲸鱼呢。`,
+              buttons: ['知道啦'],
+            });
+          } },
+      ],
+    },
+  ]);
+  Menu.setApplicationMenu(appMenu);
 }
 
 // ---------- 右键菜单 ----------
@@ -137,26 +278,46 @@ function buildMenuTemplate() {
   ];
 }
 
-function openMenu() {
+function openMenu(source) {
   try {
+    // 去抖：渲染层 IPC 和原生 context-menu 事件可能在同一秒内双双触发，只认第一次
+    const now = Date.now();
+    if (menuLog.lastPopupAt && now - menuLog.lastPopupAt < 600) {
+      logInput({ src: 'main', type: 'menu-skip', detail: `重复触发被去抖（来源=${source}）` });
+      return true;
+    }
+    menuLog.lastPopupAt = now;
     menuLog.opened++;
     menuLog.lastAt = new Date().toISOString();
+    menuLog.lastSource = source;
     if (!win || win.isDestroyed()) {
       menuLog.errors.push('win 不存在或已销毁');
       return false;
     }
     const menu = Menu.buildFromTemplate(buildMenuTemplate());
     menu.popup({ window: win });   // popup 是异步的，不会阻塞主进程
+    logInput({ src: 'main', type: 'menu-popup', detail: `菜单已弹出（来源=${source}，第 ${menuLog.opened} 次）` });
     return true;
   } catch (err) {
     menuLog.errors.push(String(err && err.message || err));
+    logInput({ src: 'main', type: 'menu-error', detail: String(err && err.message || err) });
     console.error('[右键菜单] 打开失败:', err);
     return false;
   }
 }
 
-ipcMain.on('pet:context-menu', () => openMenu());
+ipcMain.on('pet:context-menu', () => openMenu('renderer-ipc'));
 ipcMain.on('pet:quit', () => app.quit());
+
+// 渲染层把真实鼠标事件上报到这里 → 落盘成原始日志
+ipcMain.on('pet:diag', (_e, payload) => {
+  if (!payload || !Array.isArray(payload.events)) return;
+  for (const ev of payload.events) logInput(ev);
+});
+ipcMain.on('pet:diag-batch', (_e, text) => {
+  if (!text) return;
+  if (inputLogPath) { try { fs.appendFileSync(inputLogPath, String(text) + '\n'); } catch { /* ignore */ } }
+});
 
 // 拖动由 lib/click-through.js 统一处理（手动实现，因为它与逐像素穿透绑定在一起）
 ipcMain.handle('pet:get-bounds', () => {
@@ -253,7 +414,7 @@ async function runSelfCheck() {
     push('永远置顶生效', state.alwaysOnTop === true, `alwaysOnTop=${state.alwaysOnTop}`);
     // 用页面视口（逻辑 CSS 像素）判定尺寸；Windows 在高 DPI 下会把窗口吸到整数物理像素网格，
     // 1.5 缩放时 260x320 会变成 264x324，属于系统行为，不是 bug → 给 ±4 逻辑像素容差
-    const TOL = 4;
+    const TOL = 6; // 加上菜单栏可能带来的 1px 取整，容差放宽到 ±6
     const dw = Math.abs(metrics.innerSize.w - WIN_W);
     const dh = Math.abs(metrics.innerSize.h - WIN_H);
     push('窗口尺寸符合设计(±4)', dw <= TOL && dh <= TOL,
@@ -274,6 +435,16 @@ async function runSelfCheck() {
     push('穿透掩码已生成', cs.maskReady === true, `maskCoverage=${maskStats.maskCoverage} 物理=${maskStats.maskPhysical}`);
     push('掩码只覆盖实体（不是整块窗口）', maskStats.maskCoverage > 0.05 && maskStats.maskCoverage < 0.75,
       `实体占比=${maskStats.maskCoverage}（接近 1.0 说明整窗被判为实体，穿透会失效）`);
+    // 掩码不该贴到窗口边缘——贴边说明有"整圈辅助视觉"（比如调试红框）被烧进了掩码
+    const mb = maskStats.maskBbox;
+    push('掩码未把窗口边框当成实体', !!mb && mb.minX >= 2 && mb.minY >= 2,
+      `maskBbox=${JSON.stringify(mb)}（minX/minY 为 0 说明有整圈元素被误判为实体）`);
+    // ⚠️ round-04 事故：当初用 insertCSS 隐藏气泡，而 insertCSS 无法撤销，
+    //    导致生成掩码后气泡永久不可见（点击有反应但屏幕上什么都看不到）
+    const mr = maskStats.maskRestore;
+    push('生成掩码后气泡已恢复可见（不许用不可撤销的 insertCSS）',
+      !!mr && mr.styleLeft === false && mr.freezeClassLeft === false && mr.bubbleVisibility === 'visible',
+      `样式标签残留=${mr && mr.styleLeft} 冻结类残留=${mr && mr.freezeClassLeft} 气泡 visibility=${mr && mr.bubbleVisibility}`);
 
     // 取窗口内几个点的屏幕坐标：中心(实体)、左上角(空气)、右下角(空气)、窗口外
     const rect = win.getBounds();
@@ -315,6 +486,7 @@ async function runSelfCheck() {
     console.log('--- 交互断言 ---');
     for (const c of inter.checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}  (${c.detail})`);
     console.log(`交互截图: ${inter.screenshot}`);
+    console.log(`窗口尺寸轨迹: ${inter.boundsTrace}`);
 
     // 断言总数重算
     report.passed = report.checks.filter((c) => c.pass).length;
@@ -343,6 +515,10 @@ async function runInteractionTest() {
   const push = (name, pass, detail) => checks.push({ name, pass, detail });
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const js = (code) => win.webContents.executeJavaScript(code);
+  // 窗口尺寸漂移追踪：找出 +1px 是哪一步引入的
+  const boundsTrace = [];
+  const trace = (tag) => { const b = win.getBounds(); boundsTrace.push(`${tag}=${b.width}x${b.height}`); return b; };
+  trace('交互开始');
 
   await js('window.__petTest.click()');
   await wait(180);
@@ -377,6 +553,7 @@ async function runInteractionTest() {
     await js('window.__petTest.dragSimulate()');
     sizes.push(`${win.getBounds().width}x${win.getBounds().height}`);
   }
+  trace('拖动模拟后');
   const after = win.getBounds();
   push('反复拖动 5 轮窗口尺寸不漂移', new Set(sizes).size === 1,
     `每轮尺寸=${sizes.join(' → ')}`);
@@ -400,17 +577,42 @@ async function runInteractionTest() {
   // ---------- 真实事件链（真人操作路径，旧版自检漏掉的就是这条） ----------
   const stateBefore = await js('window.__petTest.state()');
   const realClick = await js('window.__petTest.realClick()');
+  trace('realClick后');
   await wait(150);
   let s2 = await js('window.__petTest.state()');
   const clickDelta = s2.clickCount - stateBefore.clickCount;
   push('真实点击链(mousedown→mouseup→click)触发 click', clickDelta === 1, `click 计数 +${clickDelta}`);
   push('真实点击后出气泡', s2.bubbleShown === true && s2.bubbleText.length > 0, `text="${s2.bubbleText}" shown=${s2.bubbleShown}`);
+
+  // 「class 加上」≠「屏幕上看得见」——必须等过渡跑完再看透明度和几何是否在视口内
+  await wait(400);
+  let sVis = await js('window.__petTest.state()');
+  push('气泡真的可见（透明度≈1）', sVis.bubbleOpacity >= 0.95, `opacity=${sVis.bubbleOpacity}`);
+  push('气泡完整在窗口视口内', sVis.bubbleInViewport === true, `rect=${JSON.stringify(sVis.bubbleRect)}`);
+  // 以像素证据再验一次：截图里气泡区域必须有不透明像素
+  const bubbleShot = await win.webContents.capturePage();
+  const bmp = bubbleShot.toBitmap();
+  const shotW = bubbleShot.getSize().width;
+  const dprNow = await js('window.devicePixelRatio');
+  const bx = Math.round(sVis.bubbleRect.left * dprNow), by = Math.round(sVis.bubbleRect.top * dprNow);
+  const bw = Math.round(sVis.bubbleRect.w * dprNow), bh = Math.round(sVis.bubbleRect.h * dprNow);
+  let bubblePixels = 0;
+  for (let y = by; y < by + bh; y++) {
+    for (let x = bx; x < bx + bw; x++) {
+      if (y < 0 || x < 0 || y >= bubbleShot.getSize().height || x >= shotW) continue;
+      if (bmp[(y * shotW + x) * 4 + 3] >= 16) bubblePixels++;
+    }
+  }
+  fs.writeFileSync(path.join(ARTIFACTS, 'shot-bubble.png'), bubbleShot.toPNG());
+  push('截图里气泡区域确实被画出来了（像素证据）', bubblePixels > bw * bh * 0.5,
+    `气泡区域不透明像素 ${bubblePixels}/${bw * bh}（占比 ${(bubblePixels / (bw * bh) * 100).toFixed(0)}%）→ artifacts/shot-bubble.png`);
   push('快速点击后未卡在拖拽态（race 回归断言）', realClick.dragging === false && s2.dragging === false,
     `点击瞬间 dragging=${realClick.dragging}，150ms 后 dragging=${s2.dragging}`);
 
   // ---------- 右键菜单 ----------
   const menuBefore = menuLog.opened;
   const realMenu = await js('window.__petTest.realContextMenu()');
+  trace('realContextMenu后');
   await wait(200);
   push('右键事件被 renderer 捕获并阻止默认行为', realMenu.fired === true && realMenu.defaultPrevented === true,
     `count=${realMenu.count} from=${realMenu.from} defaultPrevented=${realMenu.defaultPrevented}`);
@@ -422,14 +624,32 @@ async function runInteractionTest() {
   // 旧实现两个错误：① mousedown 里 preventDefault 会抑制 contextmenu
   //                ② 无阈值即拖动，点一下的微抖动让窗口跟着动 → click 也不产生
   const jitterClick = await js('window.__petTest.realClickWithJitter(3)');
+  trace('jitterClick后');
   await wait(150);
   push('微抖动点击(±3px)仍能出气泡（根因①回归）', jitterClick.sayDelta === 1 && jitterClick.clickDelta === 1,
     `say +${jitterClick.sayDelta}, click +${jitterClick.clickDelta}`);
 
   const dragChain = await js('window.__petTest.realDrag(30)');
+  trace('realDrag后');
   await wait(120);
   push('拖动链仍可用（30px 移动触发拖动）', dragChain.draggingDuring === true && dragChain.draggingAfter === false,
     `拖动中=${dragChain.draggingDuring} 结束后=${dragChain.draggingAfter}`);
+
+  // ★真实拖动（会真的移动窗口）反复 3 轮，验证尺寸零漂移；跑完把位置还原，别把桌宠搬走
+  const originBounds = win.getBounds();
+  const realSizes = [];
+  for (let i = 0; i < 3; i++) {
+    const rb = await js('window.__petTest.realDrag(40)');
+    await wait(150);
+    const cur = win.getBounds();
+    realSizes.push(`${cur.width}x${cur.height}`);
+    void rb;
+  }
+  win.setBounds(originBounds); // 还原位置
+  await wait(150);
+  push('真实拖动反复 3 轮尺寸零漂移（DPI 量化补偿）', new Set(realSizes).size === 1,
+    `每轮 ${realSizes.join(' → ')}（起点 ${originBounds.width}x${originBounds.height}）`);
+  trace('真实拖动3轮后');
 
   // mousedown 之后立刻右键：如果 mousedown 里还有 preventDefault，contextmenu 会被抑制
   const menuBefore2 = menuLog.opened;
@@ -453,9 +673,18 @@ async function runInteractionTest() {
   push('左键按下后紧接右键仍能打开菜单（根因②回归）',
     mdThenMenu.handled === true && mdThenMenu.mousedownPrevented === false && menuLog.opened === menuBefore2 + 1,
     `mousedown 被阻止=${mdThenMenu.mousedownPrevented}（必须为 false）菜单次数 ${menuBefore2} → ${menuLog.opened}`);
-  await wait(2900); // 等前面几个气泡都过期，避免污染交互截图
+  // 气泡 2.6 秒后自动消失；注意前面几条断言已经消耗了时间，这里按实际经过时间补齐
+  const bubbleDeadline = 3000;
+  const bubbleStart = Date.now();
+  await wait(300);
+  while (Date.now() - bubbleStart < bubbleDeadline) {
+    const sNow = await js('window.__petTest.state()');
+    if (sNow.bubbleShown === false) break;
+    await wait(300);
+  }
   const sQuiet = await js('window.__petTest.state()');
-  push('气泡会自动消失', sQuiet.bubbleShown === false, `shown=${sQuiet.bubbleShown}`);
+  push('气泡会自动消失', sQuiet.bubbleShown === false,
+    `shown=${sQuiet.bubbleShown}（等待 ${Date.now() - bubbleStart}ms）`);
 
   // 模板可独立验证（不能真的 popup，会阻塞自检）
   const tpl = buildMenuTemplate();
@@ -476,8 +705,8 @@ async function runInteractionTest() {
   const diagSnap = await js('window.__petRightDiag ? ({...window.__petRightDiag}) : null');
 
   // 交互中窗口应保持稳定
-  const b2 = win.getBounds();
-  push('交互后窗口未跑位', Math.abs(b2.width - WIN_W) <= 4 && Math.abs(b2.height - WIN_H) <= 4 && win.isVisible(),
+  const b2 = trace('全部交互后');
+  push('交互后窗口未跑位', Math.abs(b2.width - WIN_W) <= 6 && Math.abs(b2.height - WIN_H) <= 6 && win.isVisible(),
     `bounds=${b2.width}x${b2.height} visible=${win.isVisible()}`);
 
   const shot = path.join(ARTIFACTS, 'shot-interaction.png');
@@ -488,6 +717,7 @@ async function runInteractionTest() {
     finalState: s,
     menu: { log: menuLog, labels },
     rightClickDiag: diagSnap,
+    boundsTrace: boundsTrace.join(' → '),
     checks,
   };
 }

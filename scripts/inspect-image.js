@@ -123,6 +123,18 @@ for (let y = 0; y < H; y += STEP) {
   rowProfile.push({ y, ratio: +(c / W).toFixed(3) });
 }
 
+// ---------- 顶部菜单栏检测 ----------
+// 无边框桌宠窗口不该出现菜单栏。若顶部若干行被不透明像素几乎整行填满，就是菜单栏挤进来了
+// （会顶掉气泡位置、并在穿透掩码里凭空多出一条横带）。
+const MENU_ROWS = Math.max(4, Math.round(H * 0.05));
+let menuRowFull = 0;
+for (let y = 0; y < MENU_ROWS; y++) {
+  let c = 0;
+  for (let x = 0; x < W; x++) if (rgba[(y * W + x) * 4 + 3] >= ALPHA_MIN) c++;
+  if (c / W > 0.85) menuRowFull++;
+}
+const topPixel = { r: rgba[0], g: rgba[1], b: rgba[2], a: rgba[3] };
+
 const topColors = Object.entries(bins).sort((a, b) => b[1] - a[1]).slice(0, 6)
   .map(([k, v]) => {
     const [r, g, b] = k.split(',').map((n) => (Number(n) << 5) + 16);
@@ -135,6 +147,8 @@ const push = (name, pass, detail) => checks.push({ name, pass, detail });
 push('内容不贴边（留透明边距）', minX > 2 && minY > 2 && maxX < W - 3 && maxY < H - 3,
   `bbox=(${minX},${minY})-(${maxX},${maxY}) 画布=${W}x${H}`);
 push('截图未被自检辅助线污染', hits.debugRed === 0, `debugRed=${hits.debugRed}（>0 说明红色边框层还开着）`);
+push('顶部没有菜单栏（无边框窗口不该有）', menuRowFull === 0,
+  `顶部 ${MENU_ROWS} 行中被填满的行数=${menuRowFull}；左上角像素=rgba(${topPixel.r},${topPixel.g},${topPixel.b},${topPixel.a})`);
 push('主体占比 15%~60%', coverage >= 0.15 && coverage <= 0.60, `coverage=${coverage}`);
 push('长发蓝在上半部分', hits.hairBlue > opaque * 0.02, `hairBlue=${hits.hairBlue} (${(hits.hairBlue / opaque * 100).toFixed(1)}%)`);
 push('身体浅蓝存在', hits.bodyBlue > opaque * 0.02, `bodyBlue=${hits.bodyBlue}`);

@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('pet', {
   // 鼠标穿透
   pointerHit: (hit) => ipcRenderer.send('pet:pointer-hit', { hit: !!hit }),
 
+  // 原始输入日志（诊断"真人点击无效"用）
+  diag: (events) => ipcRenderer.send('pet:diag', { events }),
+
   // 拖动（手动实现，因为 CSS drag 区域与逐像素穿透冲突）
   getBounds: () => ipcRenderer.invoke('pet:get-bounds'),
   dragStart: (payload) => ipcRenderer.send('pet:drag-start', payload),

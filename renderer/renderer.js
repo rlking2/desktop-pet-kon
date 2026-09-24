@@ -4,6 +4,46 @@
   const bubble = document.getElementById('bubble');
   const dbg = document.getElementById('dbg');
 
+  // ---------- 原始输入日志（诊断"真人点击无效"） ----------
+  // 合成事件自检全绿但真人操作无效 → 必须记录真实事件，不能再靠推理。
+  // 批量发送，避免每个事件一次 IPC。
+  const diagQueue = [];
+  let diagFlush = null;
+  function dlog(type, detail) {
+    diagQueue.push({ src: 'renderer', type, detail });
+    if (diagQueue.length >= 25) return flushDiag();
+    if (!diagFlush) diagFlush = setTimeout(flushDiag, 150);
+  }
+  function flushDiag() {
+    if (diagFlush) { clearTimeout(diagFlush); diagFlush = null; }
+    if (!diagQueue.length) return;
+    const batch = diagQueue.splice(0, diagQueue.length);
+    try { window.pet.diag(batch); } catch { /* 诊断失败不该影响桌宠 */ }
+  }
+  const describeTarget = (t) => (t && t.tagName ? t.tagName : '?') + (t && t.id ? '#' + t.id : '');
+  window.addEventListener('beforeunload', flushDiag);
+
+  // 记录所有鼠标相关事件（capture 阶段，保证"事件是否送达渲染层"这个问题有确凿答案）
+  const MOUSE_EVENTS = ['mousemove', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'mouseleave', 'mouseenter'];
+  for (const type of MOUSE_EVENTS) {
+    window.addEventListener(type, (e) => {
+      if (type === 'mousemove') return; // 太密集，单独降采样记录
+      dlog(type, `target=${describeTarget(e.target)} button=${e.button} detail=${e.detail} ` +
+        `client=(${Math.round(e.clientX)},${Math.round(e.clientY)}) screen=(${Math.round(e.screenX)},${Math.round(e.screenY)}) ` +
+        `defaultPrevented=${e.defaultPrevented}`);
+    }, true);
+  }
+  // mousemove 降采样：300ms 记一条，够看出"鼠标有没有动、位置在哪"
+  let lastMoveLog = 0;
+  window.addEventListener('mousemove', (e) => {
+    const now = performance.now();
+    if (now - lastMoveLog < 300) return;
+    lastMoveLog = now;
+    dlog('mousemove', `client=(${Math.round(e.clientX)},${Math.round(e.clientY)}) target=${describeTarget(e.target)}`);
+  }, true);
+
+  dlog('startup', `渲染层已就绪，含 4px 移动阈值版本；视口=${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio}`);
+
   const CLICK_LINES = [
     '主人戳人家干嘛啦！',
     '哼，人家才不是闲着没事做呢。',
@@ -85,6 +125,7 @@
   pet.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     pendingDrag = { x: Math.round(e.screenX), y: Math.round(e.screenY) };
+    dlog('drag-armed', `按下起点(屏幕)=(${pendingDrag.x},${pendingDrag.y})，等移动超过 ${DRAG_THRESHOLD}px`);
   });
 
   window.addEventListener('mousemove', (e) => {
@@ -94,6 +135,7 @@
     if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // 还只是手抖，不算拖动
     dragging = true;
     pet.classList.add('dragging');
+    dlog('drag-start', `位移=(${dx},${dy}) 超过阈值，开始拖动`);
     window.pet.dragStart({
       cursorX: Math.round(e.screenX),
       cursorY: Math.round(e.screenY),
@@ -101,17 +143,20 @@
   });
 
   const stopDrag = () => {
+    const wasDragging = dragging;
     pendingDrag = null;
     if (!dragging) return;
     dragging = false;
     pet.classList.remove('dragging');
+    dlog('drag-end', `拖动结束（本次确实拖动过=${wasDragging}）`);
     window.pet.dragEnd();
   };
   window.addEventListener('mouseup', stopDrag);
   window.addEventListener('blur', stopDrag);
   window.addEventListener('mouseleave', stopDrag);
 
-  pet.addEventListener('click', () => {
+  pet.addEventListener('click', (e) => {
+    dlog('click-handler', `气泡台词即将播放，target=${describeTarget(e.target)}`);
     say(pick(CLICK_LINES));
     playAnim('hop', 520);
   });
@@ -274,6 +319,16 @@
       petClasses: pet.className,
       bubbleShown: bubble.classList.contains('show'),
       bubbleText: bubble.textContent,
+      // 关键：class 加上不等于"看得见"，必须看计算后的透明度
+      bubbleOpacity: +(getComputedStyle(bubble).opacity),
+      bubbleRect: (() => {
+        const r = bubble.getBoundingClientRect();
+        return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) };
+      })(),
+      bubbleInViewport: (() => {
+        const r = bubble.getBoundingClientRect();
+        return r.top >= 0 && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight;
+      })(),
       lastHit,
       clickCount,
       sayCount,
