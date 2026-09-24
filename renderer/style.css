@@ -186,46 +186,6 @@ html, body {
 }
 .memo-item.done .memo-text { text-decoration: line-through; opacity: .55; }
 
-/* ---------- 临时调速滑条（主人调好后删除本段） ---------- */
-.speed-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 2px 0;
-}
-.speed-label {
-  font-size: 11px;
-  color: #5a6b7c;
-  white-space: nowrap;
-}
-.speed-value {
-  font-size: 11px;
-  font-weight: 700;
-  color: #2c6ea8;
-  min-width: 42px;
-  text-align: right;
-  white-space: nowrap;
-}
-.speed-slider {
-  flex: 1 1 auto;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  background: linear-gradient(to right, #b9c9d8, #5aa9e6);
-  cursor: pointer;
-  outline: none;
-}
-.speed-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid #2c6ea8;
-  box-shadow: 0 1px 3px rgba(20, 40, 60, .35);
-}
-
 .memo-foot {
   font-size: 10px;
   color: rgba(80, 100, 120, .8);

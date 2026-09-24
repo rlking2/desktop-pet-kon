@@ -13,13 +13,6 @@
   const dbg = document.getElementById('dbg');
   const sceneEl = document.querySelector('.scene');
 
-  // ---------- 临时调速（主人要求：调好告知数值后再固化并删除滑条） ----------
-  // 用对数刻度：滑条 0~100 映射到 0.125×~8×，这样 0.5× 与 2× 在滑条上左右对称，好调。
-  // 有效帧延时 = 原始延迟 ÷ 倍率（倍率越大越快）。
-  // ⚠️ 必须声明在最顶部：调速块在下方执行，若声明在后会踩 TDZ
-  //    （实测报错 "Cannot access 'SPEED' before initialization"）。
-  const SPEED = { min: 0.125, max: 8, mult: 1.5 };
-
   // ---------- 原始输入日志 ----------
   const diagQueue = [];
   let diagFlush = null;
@@ -296,28 +289,6 @@
     closeMemo();
   });
 
-  // ---------- 临时调速滑条 ----------
-  // ⚠️ 位置很关键：必须放在 `spriteState` 声明之后（下面 spriteState 那块）。
-  //    人家一开始放在这里，运行时报 "Cannot access 'spriteState' before initialization" —— TDZ。
-  //    这里只定义函数与元素引用，真正的初始化调用放在 spriteState 之后。
-  const speedUI = (() => {
-    const slider = document.getElementById('speedSlider');
-    const valueEl = document.getElementById('speedValue');
-    const sliderToMult = (v) => SPEED.min * Math.pow(SPEED.max / SPEED.min, v / 100);
-    const multToSlider = (m) => Math.round(100 * Math.log(m / SPEED.min) / Math.log(SPEED.max / SPEED.min));
-    return {
-      slider, valueEl, sliderToMult, multToSlider,
-      apply(mult, fromSlider) {
-        SPEED.mult = mult;
-        const txt = mult.toFixed(2) + '×';
-        if (valueEl) valueEl.textContent = txt;
-        if (spriteState) spriteState.speed = mult;   // spriteState 此时已初始化
-        if (!fromSlider && slider) slider.value = String(multToSlider(mult));
-        dlog('speed', `播放速度倍率 = ${txt}（每帧有效延时 ≈ ${(120 / mult).toFixed(0)}ms）`);
-      },
-    };
-  })();
-
   // ---------- 气泡自动翻面（窗口贴屏幕顶部时改从下方弹出） ----------
   let flipShown = null;
   function updateFlip() {
@@ -498,15 +469,6 @@
     activeGroup: null, activeFrame: 0, drewFrames: 0, placeholder: false, hovering: false,
   };
   const PRIORITY = { pet: 3, angry: 2, happy: 1, idle: 0 };
-
-  // 调速滑条初始化（此时 spriteState 已存在）：绑事件 + 应用默认倍率
-  if (speedUI.slider) {
-    speedUI.slider.value = String(speedUI.multToSlider(SPEED.mult));
-    speedUI.slider.addEventListener('input', () => {
-      speedUI.apply(speedUI.sliderToMult(Number(speedUI.slider.value)), true);
-    });
-  }
-  speedUI.apply(SPEED.mult, false);
   // 鼠标靠近状态（放在前面声明：mousemove 处理器在初始化阶段就可能调用 setHover，
   // 而 setHover 在下面才定义；用 const 声明在后面会踩 TDZ 的坑）
   const hoverState = { active: false, enters: 0, exits: 0 };
@@ -626,7 +588,7 @@
     }
     if (spriteTimeline.name) {
       const g = spriteGroups[spriteTimeline.name];
-      if (g && ts - lastAdvance >= ((g.delays[spriteState.activeFrame] || 120) / SPEED.mult)) {
+      if (g && ts - lastAdvance >= (g.delays[spriteState.activeFrame] || 204)) {
         lastAdvance = ts;
         const next = spriteState.activeFrame + 1;
         if (next >= g.images.length) {
@@ -880,12 +842,6 @@
       return { ...memoSnapshot(), started: true };
     },
     memoClear: () => { memoState.tasks = []; saveTasks(); renderMemo(); return memoSnapshot(); },
-    // 临时调速：自检用入口（主人调好后这个方法也会一并删掉）
-    setSpeed: (mult) => {
-      const m = Math.max(SPEED.min, Math.min(SPEED.max, Number(mult) || 1));
-      speedUI.apply(m, false);
-      return { speed: SPEED.mult, sliderValue: speedUI.slider ? Number(speedUI.slider.value) : null };
-    },
     memoSnapshot,
     memoScrollTo: (top) => {
       if (memoScroll) { memoScroll.scrollTop = top; }
@@ -920,8 +876,8 @@
         hovering: spriteState.hovering,
         hoverEnters: hoverState.enters,
         hoverExits: hoverState.exits,
-        speed: spriteState.speed,
-        loadedDelays: /* 每组的原始帧延时，供自检核对 */ (() => {
+        // 每组的原始帧延时（ms），供自检核对播放速度
+        loadedDelays: (() => {
           const o = {};
           for (const [k, g] of Object.entries(spriteGroups)) o[k] = g.delays.slice();
           return o;

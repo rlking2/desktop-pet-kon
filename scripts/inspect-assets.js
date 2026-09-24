@@ -19,6 +19,11 @@ const zlib = require('node:zlib');
 const ROOT = path.join(__dirname, '..');
 const ASSETS = path.join(ROOT, 'assets');
 const ALPHA_MIN = 16;
+// 帧延时基准与速度倍率。
+// 主人用临时调速滑条试出的速度是 0.49×；按 100ms 基准换算 → 每帧 204ms。
+// 想再调速度时改这两个数即可（延时 = BASE_DELAY_MS / SPEED_MULTIPLIER）。
+const BASE_DELAY_MS = 100;
+const SPEED_MULTIPLIER = 0.49;
 
 // ---------- PNG 解码（8bit，非隔行，支持 RGBA/RGB/灰度） ----------
 function decodePNG(buf) {
@@ -462,12 +467,18 @@ function inspectGroup(group, opts) {
       fs.writeFileSync(path.join(framesDir, name), encodePNG(canvasW, canvasH, canvas));
       written.push(name);
     }
+    // 每帧延时 = 基准 ÷ 速度倍率。主人用临时调速滑条试出的速度是 0.49×，
+    // 按 100ms 基准换算 → 204ms/帧（100 ÷ 0.49 ≈ 204）。
+    // 想再调速度：改上面两个常量后重新跑 --write 即可。
+    const frameDelay = Math.round(BASE_DELAY_MS / SPEED_MULTIPLIER);
     const groupEntry = {
       canvas: { width: canvasW, height: canvasH },
-      defaultDelayMs: 120,
+      defaultDelayMs: frameDelay,
+      speedMultiplier: SPEED_MULTIPLIER,   // 记录倍率与基准，方便以后换算
+      baseDelayMs: BASE_DELAY_MS,
       frames: written.map((name, i) => ({
         file: path.relative(ASSETS, path.join(framesDir, name)).replace(/\\/g, '/'),
-        delayMs: 120,
+        delayMs: frameDelay,
         index: i,
       })),
     };

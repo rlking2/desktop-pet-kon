@@ -787,25 +787,24 @@ async function runSelfCheck() {
 
       report.memo = { opened, withTasks, afterDone, full };
 
-      // ---------- 临时调速滑条（主人调好速度后会删掉，届时这段断言一起删） ----------
+      // ---------- 播放速度（主人用临时滑条定为 0.49×，已固化进清单） ----------
       {
-        const s1 = await js('window.__petTest.setSpeed(1)');
-        const st1 = await js('window.__petTest.state()');
-        const s2 = await js('window.__petTest.setSpeed(3)');
-        const st2 = await js('window.__petTest.state()');
-        push('调速滑条存在且可用', s1.speed !== null && s2.speed !== null,
-          `1× → speed=${s1.speed}（滑块 ${s1.sliderValue}）；3× → speed=${s2.speed}（滑块 ${s2.sliderValue}）`);
-        push('速度倍率可改变帧延时', Math.abs(st1.sprite.speed - 1) < 0.01 && Math.abs(st2.sprite.speed - 3) < 0.01,
-          `state.speed ${st1.sprite.speed} → ${st2.sprite.speed}`);
-        // 有效延时 = 原始延时 / 倍率
-        const baseDelay = (st2.sprite.loadedDelays.idle || [])[0] || 120;
-        push('有效帧延时可推算（延时/倍率）',
-          Math.abs(baseDelay / st2.sprite.speed - baseDelay / 3) < 0.01,
-          `原始 ${baseDelay}ms ÷ ${st2.sprite.speed} = ${(baseDelay / st2.sprite.speed).toFixed(1)}ms/帧` +
-          `（1× 时 ${baseDelay}ms/帧，3× 时 ${(baseDelay / 3).toFixed(1)}ms/帧）`);
-        // 恢复默认 1.5×
-        const s3 = await js('window.__petTest.setSpeed(1.5)');
-        push('速度可恢复默认值', Math.abs(s3.speed - 1.5) < 0.01, `恢复为 ${s3.speed}×`);
+        const st = await js('window.__petTest.state()');
+        const delays = st.sprite.loadedDelays || {};
+        const groups = Object.keys(delays);
+        const allDelays = groups.flatMap((g) => delays[g]);
+        const uniq = [...new Set(allDelays)];
+        // 0.49× 按 100ms 基准换算 = 204ms/帧
+        const expected = Math.round(100 / 0.49);
+        push('帧延时已按主人定的速度固化（0.49× → 约 204ms/帧）',
+          uniq.length === 1 && Math.abs(uniq[0] - expected) <= 2,
+          `实测每帧延时=${uniq.join('/')}ms（期望 ${expected}ms = 100ms ÷ 0.49）；` +
+          `动作组=${groups.join(', ')}；一轮 idle ≈ ${(uniq[0] * (delays.idle || []).length / 1000).toFixed(2)} 秒`);
+        push('调速滑条已删除（临时模块清理干净）',
+          (await js('!!document.getElementById("speedSlider")')) === false
+          && (await js('!!document.getElementById("speedRow")')) === false
+          && (await js('typeof window.__petTest.setSpeed')) === 'undefined',
+          `#speedSlider 存在=false；#speedRow 存在=false；__petTest.setSpeed 已移除`);
       }
 
       // ---------- 关闭方式（放在最后：关闭动作会隐藏面板，会干扰上面的测量） ----------
