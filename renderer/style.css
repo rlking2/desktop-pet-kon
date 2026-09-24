@@ -259,19 +259,7 @@ html, body {
   height: 130px;
 }
 
-/* ---------- 名牌与提示 ---------- */
-.name {
-  margin-top: 5px;
-  font-size: 10px;
-  letter-spacing: 1.5px;
-  color: #f2fbff;
-  padding: 1px 8px;
-  border-radius: 8px;
-  background: rgba(40, 55, 70, .78);
-  border: 1px solid rgba(200, 220, 235, .55);
-  white-space: nowrap;
-}
-
+/* ---------- 提示文字（名牌已按主人要求移除） ---------- */
 .hint {
   margin-top: 4px;
   font-size: 9px;

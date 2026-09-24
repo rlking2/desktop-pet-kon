@@ -22,11 +22,14 @@ const OUTDIR = path.join(ASSETS, 'cutout');
 
 // ---------------- 参数 ----------------
 const args = process.argv.slice(2);
-const opt = { tol: 34, size: 0, feather: 1, preview: false, debug: false, files: [] };
+const opt = { tol: 34, size: 0, feather: 1, preview: false, debug: false,
+  auto: true, tolCandidates: [16, 22, 28, 34, 40, 48], files: [] };
 for (const a of args) {
   if (a === '--preview') opt.preview = true;
   else if (a === '--debug') opt.debug = true;
-  else if (a.startsWith('--tol=')) opt.tol = Number(a.split('=')[1]);
+  else if (a === '--no-auto') opt.auto = false;
+  else if (a === '--auto') opt.auto = true;
+  else if (a.startsWith('--tol=')) { opt.tol = Number(a.split('=')[1]); opt.auto = false; }
   else if (a.startsWith('--size=')) opt.size = Number(a.split('=')[1]);
   else if (a.startsWith('--feather=')) opt.feather = Number(a.split('=')[1]);
   else opt.files.push(a);
@@ -360,20 +363,18 @@ function trimAndScale(rgba, W, H, targetSize) {
 // ---------------- 主流程 ----------------
 function listPngs() {
   const out = [];
-  (function walk(dir) {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (e.isDirectory()) {
-        if (e.name === 'cutout' || e.name === 'build' || e.name.startsWith('_')) continue;
-        walk(path.join(dir, e.name));
-        continue;
-      }
-      const full = path.join(dir, e.name);
-      try {
-        const fd = fs.openSync(full, 'r'); const h = Buffer.alloc(4); fs.readSync(fd, h, 0, 4, 0); fs.closeSync(fd);
-        if (h[0] === 0x89 && h[1] === 0x50) out.push(full);
-      } catch { /* 跳过 */ }
-    }
-  })(ASSETS);
+  // 只扫 assets 根目录里的原图。子目录一律不碰：
+  //   cutout/ = 上一次的输出（避免二次抠图）
+  //   idle/   = 已接入的帧序列（已经是对齐后的成品）
+  //   build/  = 对齐产物
+  for (const e of fs.readdirSync(ASSETS, { withFileTypes: true })) {
+    if (!e.isFile()) continue;
+    const full = path.join(ASSETS, e.name);
+    try {
+      const fd = fs.openSync(full, 'r'); const h = Buffer.alloc(4); fs.readSync(fd, h, 0, 4, 0); fs.closeSync(fd);
+      if (h[0] === 0x89 && h[1] === 0x50) out.push(full);
+    } catch { /* 跳过 */ }
+  }
   return out.sort();
 }
 
@@ -397,10 +398,33 @@ for (const f of files) {
   catch (err) { console.log(`❌ ${rel}  解码失败: ${err.message}`); continue; }
 
   const bg = findBackgroundColors(img, opt);
-  const res = cutout(img, bg, opt);
+
+  // 自动调容差：逐张试几档 tol，挑"主体占比最健康"的那档。
+  // 为什么要它：条纹/标签这类背景色簇多的时候，容差稍大就会把主体颜色也当背景，
+  // 出现"抠过头"（实测 10.png 只剩 1.6% 不透明像素，几乎抠空）。
+  let chosenTol = opt.tol;
+  if (opt.auto) {
+    let best = null;
+    for (const t of opt.tolCandidates) {
+      const r = cutout(img, bg, { ...opt, tol: t });
+      const subjectPct = 100 - r.removedPct;
+      // 健康区间：主体占 6%~45%。低于 6% 多半啃到主体，高于 45% 多半没抠干净。
+      const dist = subjectPct < 6 ? (6 - subjectPct) * 4
+        : subjectPct > 45 ? (subjectPct - 45) * 4
+          : Math.abs(subjectPct - 22);
+      // 同分时偏向"更小容差"（更保守，不容易啃主体）
+      const score = dist + t * 0.001;
+      if (!best || score < best.score) best = { tol: t, score, subjectPct, removedPct: r.removedPct };
+    }
+    chosenTol = best.tol;
+    if (opt.debug) {
+      console.log(`  [调试] 自动容差 → ${chosenTol}（主体占比 ${best.subjectPct.toFixed(1)}%）`);
+    }
+  }
+
+  const res = cutout(img, bg, { ...opt, tol: chosenTol });
   const scaled = trimAndScale(res.rgba, img.width, img.height, opt.size);
   if (opt.debug) {
-    const at = (x, y) => { const i = (y * img.width + x) * 4; return `${rgba[i]},${rgba[i+1]},${rgba[i+2]}`; };
     const { rgba } = img;
     console.log(`  [调试] 外圈新增背景色 ${bg.outerAdded} 种；外圈采样数=${bg.outerSampleCount} 外圈主色=${JSON.stringify(bg.outerTop)}`);
     console.log(`  [调试] 最终背景色: ${bg.colors.map((c) => `rgb(${c.rgb.join(',')})${c.fromBorder ? '(来自外圈)' : ''}`).join('  ')}`);
@@ -415,7 +439,7 @@ for (const f of files) {
 
   console.log(`${path.basename(f)}  ${img.width}x${img.height}`);
   console.log(`  背景色: ${bg.colors.map((c) => `rgb(${c.rgb.join(',')}) ${c.pct}%`).join('   ')}`);
-  console.log(`  删除像素: ${res.removedPct}%   保留主体: ${subjectPct}%   裁切后: ${scaled.trimmed ? `${scaled.trimmed.w}x${scaled.trimmed.h}` : '空'}   输出: ${scaled.w}x${scaled.h}`);
+  console.log(`  容差: ${chosenTol}${opt.auto ? '（自动挑选）' : '（指定）'}   删除像素: ${res.removedPct}%   保留主体: ${subjectPct}%   裁切后: ${scaled.trimmed ? `${scaled.trimmed.w}x${scaled.trimmed.h}` : '空'}   输出: ${scaled.w}x${scaled.h}`);
   if (warnings.length) warnings.forEach((w) => console.log(`  ⚠️ ${w}`));
   else okCount++;
 

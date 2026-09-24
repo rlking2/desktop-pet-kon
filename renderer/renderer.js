@@ -11,7 +11,6 @@
   const pet = document.getElementById('pet');
   const bubble = document.getElementById('bubble');
   const dbg = document.getElementById('dbg');
-  const nameEl = document.getElementById('name');
   const sceneEl = document.querySelector('.scene');
 
   // ---------- 原始输入日志 ----------

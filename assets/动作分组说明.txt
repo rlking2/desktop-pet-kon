@@ -1,0 +1,6 @@
+﻿assets\idle\     待机动画（角色一直循环播）    ← 放主人选的图
+assets\interact\ 交互动画（点击/摸头时播一次）  ← 放主人选的图
+assets\hover\    鼠标靠近动画（移上去时播）    ← 放主人选的图
+assets\cutout\   13 张抠好的成品（挑图用，不参与播放）
+
+放好后跑：npm run assets:write

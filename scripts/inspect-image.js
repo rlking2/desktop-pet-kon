@@ -157,13 +157,28 @@ try {
 
 push('内容不贴边（留透明边距）', minX > 2 && minY > 2 && maxX < W - 3 && maxY < H - 3,
   `bbox=(${minX},${minY})-(${maxX},${maxY}) 画布=${W}x${H}`);
-push('截图未被自检辅助线污染', hits.debugRed === 0, `debugRed=${hits.debugRed}（>0 说明红色边框层还开着）`);
+// 调试边框检测：只认调试框**专有色**（#ff3f6f 纯红 + 深红角标），不能用"偏红就算"。
+// 实测教训：主人照片里有 rgb(230,72,73) 这类红色**内容**（衣服/唇色），
+// 宽松判定会把它误报成"调试框还开着"（实测误报 313 个像素，害人家查了半天）。
+const dbgFrameRed = (() => {
+  let c = 0;
+  for (let i = 0; i < W * H; i++) {
+    const o = i * 4, r = rgba[o], g = rgba[o + 1], b = rgba[o + 2];
+    if (r >= 248 && g >= 55 && g <= 75 && b >= 100 && b <= 125) c++;
+  }
+  return c;
+})();
+push('截图未被自检辅助线污染', dbgFrameRed === 0,
+  `调试框专有色(#ff3f6f)像素=${dbgFrameRed}`
+  + (dbgFrameRed === 0 && hits.debugRed > 0 ? `（另有 ${hits.debugRed} 个"偏红"像素来自素材本身，不算污染）` : ''));
 push('顶部没有菜单栏（无边框窗口不该有）', menuRowFull === 0,
   `顶部 ${MENU_ROWS} 行中被填满的行数=${menuRowFull}；左上角像素=rgba(${topPixel.r},${topPixel.g},${topPixel.b},${topPixel.a})`);
-// 主体占比断言：具体主题形象应在 15%~60%；空位提示环本身更小（约 8%~20%），另有下限
-const covMin = placeholderMode ? 0.06 : 0.15;
+// 主体占比：具体主题形象 15%~60%；空位提示更小；**真实照片素材**常是竖构图，
+// 塞进方形画布后左右自然留空（实测 6.8%），所以按模式区分下限。
+const covMin = spriteMode ? 0.04 : (placeholderMode ? 0.06 : 0.15);
 push(`主体占比 ${(covMin * 100).toFixed(0)}%~60%`, coverage >= covMin && coverage <= 0.60,
-  `coverage=${coverage}${placeholderMode ? '（空位提示模式，下限放宽）' : ''}`);
+  `coverage=${coverage}`
+  + (spriteMode ? '（素材模式：竖构图照片左右留空属正常）' : placeholderMode ? '（空位提示模式，下限放宽）' : ''));
 push('轮廓有起伏（不是方块）', new Set(rowProfile.map((r) => r.ratio)).size >= 4,
   `行宽分布去重=${new Set(rowProfile.map((r) => r.ratio)).size}`);
 
