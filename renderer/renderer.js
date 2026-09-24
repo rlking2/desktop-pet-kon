@@ -401,21 +401,31 @@
   window.pet.onDebugOverlay((on) => dbg.classList.toggle('on', !!on));
   window.pet.onForceHit((hit) => { lastHit = hit; window.pet.pointerHit(hit); });
 
+  // ---------- 菜单动作 ----------
+  // 主人把 1/5/6 分给"交互"，所以摸头等动作应当**播放交互动作组**（而不是只做轻微形变）。
+  // 之前只做了 CSS 形变兜底，照片素材上几乎看不出来 → 主人反馈"摸头功能没有实现"。
   window.pet.onAction((name) => {
+    dlog('action', `收到菜单动作「${name}」`);
+    const INTERACT_GROUP = 'interact';
     if (name === 'headpat') {
       say(pick(LINES.pat));
-      if (!playAction('pet', ['headpat', 'pat'])) playAnim('pat', 720);
+      // 优先播"交互"动作组；组名也兼容 pet / headpat / pat
+      const played = playAction(INTERACT_GROUP, ['pet', 'headpat', 'pat']);
+      if (!played) { playAnim('pat', 720); dlog('action', '无交互素材 → 退回 CSS 形变动画'); }
+      else dlog('action', `已播放「${INTERACT_GROUP}」交互动作组`);
       return;
     }
     if (name === 'rice') {
       rice += 1;
       say(`${pick(LINES.rice)}\n（已投喂 ${rice} 次）`, 3200);
-      if (!playAction('happy', ['hop', 'eat'])) playAnim('hop', 520);
+      if (!playAction(INTERACT_GROUP, ['happy', 'hop', 'eat'])) playAnim('hop', 520);
+      else dlog('action', `已播放「${INTERACT_GROUP}」交互动作组`);
       return;
     }
     if (name === 'angry') {
       say(pick(LINES.angry));
-      if (!playAction('angry')) playAnim('angry', 1300);
+      if (!playAction(INTERACT_GROUP, ['angry'])) playAnim('angry', 1300);
+      else dlog('action', `已播放「${INTERACT_GROUP}」交互动作组`);
       return;
     }
   });

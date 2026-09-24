@@ -1123,7 +1123,10 @@ async function runInteractionTest() {
                  outX: 2, outY: 2 };
       })()`);
       // 先移出（确保从"离开"状态开始，避免初始化时鼠标恰好已在角色上导致基线不准）
-      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 2, clientY: 2 }))`);
+      // 用动态算出的"角色外一点"（y 取角色上边 -30），不要用写死的角落坐标
+      const outPos = await js(`(() => { const b = document.getElementById('sprite').getBoundingClientRect();
+        return { x: Math.round(b.left + b.width / 2), y: Math.max(0, Math.round(b.top) - 30) }; })()`);
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${outPos.x}, clientY: ${outPos.y} }))`);
       await wait(300);
       const out0 = await js('window.__petTest.state()');
       // 再移入角色
@@ -1135,8 +1138,8 @@ async function runInteractionTest() {
         && inState.sprite.timeline && inState.sprite.timeline.group === 'hover',
         `移出基线 enters=${out0.sprite.hoverEnters} → 移入后 ${inState.sprite.hoverEnters}；`
         + `hovering=${inState.sprite.hovering} 当前动作=${inState.sprite.timeline ? inState.sprite.timeline.group : 'null'}`);
-      // 移出角色
-      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${r.outX}, clientY: ${r.outY} }))`);
+      // 移出角色（同样用动态算出的"角色外一点"）
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${outPos.x}, clientY: ${outPos.y} }))`);
       await wait(400);
       const outState = await js('window.__petTest.state()');
       push('鼠标移出 → 回到待机动作',
@@ -1145,6 +1148,77 @@ async function runInteractionTest() {
     } else {
       push('鼠标靠近动作可触发（当前无 hover 素材，跳过）', true, `现有动作: ${(spB.groups || []).join(', ') || '无'}`);
     }
+  }
+
+  // ---------- 菜单动作 → 交互动作组（主人把 1/5/6 分给"交互"） ----------
+  {
+    // 统一的"鼠标移出/移入"动作：**动态算坐标**，不用写死的 (2,2) ——
+    // 角色矩形实测是 [40,12,171,227]，(2,2) 距上边只有 2px，闸值太脆。
+    const OUT_POS = { x: 1, y: 0 };
+    const hoverOut = async () => {
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${OUT_POS.x}, clientY: ${OUT_POS.y} }))`);
+      await wait(260);
+    };
+    const hoverIn = async () => {
+      const c = await js(`(() => { const b = document.getElementById('sprite').getBoundingClientRect();
+        return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; })()`);
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${c.x}, clientY: ${c.y} }))`);
+      await wait(200);
+    };
+
+    const before = await js('window.__petTest.state()');
+    const spA = before.sprite || {};
+    if (spA.available && (spA.groups || []).includes('interact')) {
+      await hoverOut();
+      const outBase = await js('window.__petTest.state()');
+      // 摸头
+      win.webContents.send('pet:action', 'headpat');
+      await wait(300);
+      const afterPat = await js('window.__petTest.state()');
+      push('右键摸头 → 播放「交互」动作组',
+        afterPat.sprite.timeline && afterPat.sprite.timeline.group === 'interact'
+        && afterPat.bubbleShown === true,
+        `当前动作=${afterPat.sprite.timeline ? afterPat.sprite.timeline.group : 'null'}`
+        + ` 气泡="${afterPat.bubbleText}" 可见=${afterPat.bubbleShown}`);
+      // 交互动作是"播一次"，等它播完应自动回待机
+      await wait(1600);
+      const afterDone = await js('window.__petTest.state()');
+      push('交互动作播完自动回待机',
+        afterDone.sprite.timeline && afterDone.sprite.timeline.group === afterDone.sprite.baseGroup,
+        `当前动作=${afterDone.sprite.timeline ? afterDone.sprite.timeline.group : 'null'} 待机=${afterDone.sprite.baseGroup}`);
+      // 喂白饭也走交互组（注意：鼠标要停在角色外，否则播完会停在 hover 而不是 idle）
+      await hoverOut();
+      win.webContents.send('pet:action', 'rice');
+      await wait(300);
+      const afterRice = await js('window.__petTest.state()');
+      push('喂白饭 → 也播放「交互」动作组',
+        afterRice.sprite.timeline && afterRice.sprite.timeline.group === 'interact',
+        `当前动作=${afterRice.sprite.timeline ? afterRice.sprite.timeline.group : 'null'} 气泡="${(afterRice.bubbleText || '').slice(0, 20)}"`);
+      await wait(1600);
+      // 鼠标停在角色上时，交互播完应停在「靠近」而不是待机（这是设计行为，也要盯着）
+      await hoverIn();
+      win.webContents.send('pet:action', 'headpat');
+      await wait(1600);
+      const holdHover = await js('window.__petTest.state()');
+      push('鼠标停在角色上时，交互播完停在「靠近」（不闪回待机）',
+        holdHover.sprite.hovering === true
+        && holdHover.sprite.timeline && holdHover.sprite.timeline.group === 'hover',
+        `hovering=${holdHover.sprite.hovering} 当前动作=${holdHover.sprite.timeline ? holdHover.sprite.timeline.group : 'null'}`);
+      await hoverOut();
+    } else {
+      push('菜单动作 → 交互动作组可触发（当前无 interact 素材，跳过）', true,
+        `现有动作: ${(spA.groups || []).join(', ') || '无'}`);
+    }
+  }
+
+  // 测试收尾：把面板关掉并等窗口缩回，否则后面"窗口未跑位"会读到展开态的尺寸
+  await js('window.__petTest.memoClose()');
+  await wait(900);
+  {
+    const b = win.getBounds();
+    push('全部交互测试结束后窗口回到设计尺寸',
+      Math.abs(b.width - WIN_W) <= 6 && Math.abs(b.height - WIN_H) <= 6,
+      `bounds=${b.width}x${b.height} 设计=${WIN_W}x${WIN_H}`);
   }
 
   const shot = path.join(ARTIFACTS, 'shot-interaction.png');
