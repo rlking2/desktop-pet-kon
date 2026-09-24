@@ -12,6 +12,7 @@
   const bubble = document.getElementById('bubble');
   const dbg = document.getElementById('dbg');
   const nameEl = document.getElementById('name');
+  const sceneEl = document.querySelector('.scene');
 
   // ---------- 原始输入日志 ----------
   const diagQueue = [];
@@ -98,8 +99,154 @@
     animTimer = setTimeout(() => pet.classList.remove(name), ms);
   }
 
+  // ---------- 待办面板 ----------
+  // 需求：左键点击桌宠 → 展开待办面板。顶部输入栏，下方两列网格，默认容量 5 栏；
+  //       每栏左侧一个小方框，点击即"完成并删除该栏"。
+  const MEMO_CAP = 5;
+  const MEMO_KEY = 'desktopPet.memo.tasks';
+  const memoEl = document.getElementById('memo');
+  const memoList = document.getElementById('memoList');
+  const memoInput = document.getElementById('memoInput');
+  const memoCountEl = document.getElementById('memoCount');
+  const memoCapEl = document.getElementById('memoCap');
+  const memoFoot = document.getElementById('memoFoot');
+  const memoClose = document.getElementById('memoClose');
+  if (memoCapEl) memoCapEl.textContent = String(MEMO_CAP);
+
+  const memoState = { open: false, tasks: [], renders: 0, removed: 0, added: 0, opens: 0, closes: 0 };
+
+  function loadTasks() {
+    try {
+      const raw = localStorage.getItem(MEMO_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      memoState.tasks = Array.isArray(arr) ? arr.filter((t) => t && typeof t.text === 'string').slice(0, MEMO_CAP) : [];
+    } catch { memoState.tasks = []; }
+  }
+  function saveTasks() {
+    try { localStorage.setItem(MEMO_KEY, JSON.stringify(memoState.tasks)); } catch { /* 存不下就算了，不影响使用 */ }
+  }
+  function setFoot(msg) { if (memoFoot) memoFoot.textContent = msg || ''; }
+
+  function renderMemo() {
+    if (!memoList) return;
+    memoState.renders++;
+    // 防御：任何路径把任务数撑过容量时，以容量为准（列表只显示前 5 条）
+    if (memoState.tasks.length > MEMO_CAP) memoState.tasks = memoState.tasks.slice(0, MEMO_CAP);
+    memoList.innerHTML = '';
+    for (let i = 0; i < MEMO_CAP; i++) {
+      const task = memoState.tasks[i];
+      const row = document.createElement('div');
+      row.className = 'memo-item' + (task ? '' : ' empty');
+      const box = document.createElement('button');
+      box.className = 'memo-box';
+      box.type = 'button';
+      box.setAttribute('aria-label', task ? `完成并删除：${task.text}` : '空栏位');
+      const span = document.createElement('span');
+      span.className = 'memo-text';
+      span.textContent = task ? task.text : '空';
+      if (task) {
+        box.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          completeTask(i);
+        });
+      } else {
+        box.disabled = true;
+      }
+      row.appendChild(box);
+      row.appendChild(span);
+      memoList.appendChild(row);
+    }
+    if (memoCountEl) memoCountEl.textContent = String(memoState.tasks.length);
+    const left = MEMO_CAP - memoState.tasks.length;
+    setFoot(left > 0 ? `还可以添加 ${left} 条` : '已满 5 条，勾选左方框即可完成并删除');
+  }
+
+  function addTask(text) {
+    const t = String(text || '').trim();
+    if (!t) return false;
+    if (memoState.tasks.length >= MEMO_CAP) {
+      setFoot('已满 5 条，先勾掉一条再添加');
+      return false;
+    }
+    memoState.tasks.push({ text: t, createdAt: Date.now() });
+    memoState.added++;
+    saveTasks();
+    renderMemo();
+    setFoot('已添加');
+    return true;
+  }
+
+  function completeTask(index) {
+    const task = memoState.tasks[index];
+    if (!task) return false;
+    // 先在界面上标记"完成"，让主人看到反馈，再删除并重排
+    const rows = memoList ? memoList.querySelectorAll('.memo-item') : [];
+    const row = rows[index];
+    if (row) {
+      row.classList.add('done');
+      const box = row.querySelector('.memo-box');
+      if (box) box.classList.add('done-check');
+    }
+    const label = task.text;
+    setTimeout(() => {
+      memoState.tasks.splice(index, 1);
+      memoState.removed++;
+      saveTasks();
+      renderMemo();
+      setFoot(`已完成：${label}`);
+    }, 220);
+    return true;
+  }
+
+  function requestPanelSize(open) {
+    try { window.pet.setPanel(open); } catch (err) { dlog('memo', '请求面板尺寸失败: ' + (err && err.message)); }
+  }
+
+  function openMemo() {
+    if (memoState.open) return false;
+    memoState.open = true;
+    memoState.opens++;
+    if (memoEl) { memoEl.classList.add('show'); memoEl.setAttribute('aria-hidden', 'false'); }
+    sceneEl.classList.add('memo-open');
+    renderMemo();
+    requestPanelSize(true);
+    // 让键盘焦点落到输入框（面板要能打字），同时把窗口提到可交互层
+    try { window.pet.focusWindow(); } catch { /* 忽略 */ }
+    setTimeout(() => { if (memoInput) memoInput.focus(); }, 120);
+    dlog('memo', `面板展开，当前 ${memoState.tasks.length}/${MEMO_CAP} 条`);
+    return true;
+  }
+
+  function closeMemo() {
+    if (!memoState.open) return false;
+    memoState.open = false;
+    memoState.closes++;
+    if (memoEl) { memoEl.classList.remove('show'); memoEl.setAttribute('aria-hidden', 'true'); }
+    sceneEl.classList.remove('memo-open');
+    if (memoInput) memoInput.value = '';
+    requestPanelSize(false);
+    dlog('memo', '面板收起');
+    return true;
+  }
+
+  function toggleMemo() { return memoState.open ? closeMemo() : openMemo(); }
+
+  if (memoInput) {
+    memoInput.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // 别让 Esc 之类冒泡到全局快捷键
+      if (e.key === 'Enter') {
+        addTask(memoInput.value);
+        memoInput.value = '';
+      } else if (e.key === 'Escape') {
+        closeMemo();
+      }
+    });
+  }
+  if (memoClose) memoClose.addEventListener('click', closeMemo);
+  loadTasks();
+  renderMemo();
+
   // ---------- 气泡自动翻面（窗口贴屏幕顶部时改从下方弹出） ----------
-  const sceneEl = document.querySelector('.scene');
   let flipShown = null;
   function updateFlip() {
     const topSpace = window.screenY;
@@ -169,9 +316,9 @@
   window.addEventListener('blur', stopDrag);
   window.addEventListener('mouseleave', stopDrag);
 
+  // 左键点击 = 展开/收起待办面板（原来的"随机台词"已被面板替换）
   pet.addEventListener('click', () => {
-    say(pick(LINES.click));
-    if (!playAction('happy', ['hop'])) playAnim('hop', 520);
+    toggleMemo();
   });
 
   // ---------- 右键 / 按键 ----------
@@ -182,6 +329,8 @@
     window.pet.openContextMenu();
   });
 
+  // 键盘全局快捷键：注册在**冒泡阶段**（不要用捕获阶段）。
+  // 面板打开时输入框会 stopPropagation 来接管键盘，而它只能阻止冒泡，挡不住捕获阶段。
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.pet.quit();
     if (e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
@@ -411,6 +560,36 @@
   window.addEventListener('mouseup', (e) => { if (e.button === 2) rightDiag.mouseup++; }, true);
   window.addEventListener('contextmenu', () => { rightDiag.contextmenu++; }, true);
 
+  // 面板状态快照（自检用）
+  function memoSnapshot() {
+    const rows = memoList ? memoList.querySelectorAll('.memo-item') : [];
+    const emptyRows = memoList ? memoList.querySelectorAll('.memo-item.empty') : [];
+    const boxes = memoList ? memoList.querySelectorAll('.memo-box') : [];
+    return {
+      open: memoState.open,
+      cap: MEMO_CAP,
+      count: memoState.tasks.length,
+      tasks: memoState.tasks.map((t) => t.text),
+      renderedRows: rows.length,
+      emptyRows: emptyRows.length,
+      boxCount: boxes.length,
+      // 输入框是否真的能被键盘输入
+      inputFocused: !!(memoInput && document.activeElement === memoInput),
+      inputValue: memoInput ? memoInput.value : null,
+      foot: memoFoot ? memoFoot.textContent : '',
+      panelVisible: !!(memoEl && memoEl.classList.contains('show')),
+      panelRect: memoEl ? (() => { const r = memoEl.getBoundingClientRect();
+        return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) }; })() : null,
+      panelInViewport: memoEl ? (() => { const r = memoEl.getBoundingClientRect();
+        return r.top >= 0 && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight; })() : null,
+      addedTotal: memoState.added,
+      removedTotal: memoState.removed,
+      renders: memoState.renders,
+      opens: memoState.opens,
+      closes: memoState.closes,
+    };
+  }
+
   window.__petTest = {
     click: () => pet.click(),
     action: (n) => {
@@ -424,9 +603,21 @@
       window.pet.pointerHit(hit);
       return { hit, element: describeTarget(el) };
     },
-    keyboardMenu: () => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true, cancelable: true }));
-      return { count: window.__petContextMenuCount || 0, from: window.__petContextMenuFrom || null };
+    keyboardMenu: (fromInput) => {
+      // 默认从 window 派发（模拟"面板没开时按键"）；
+      // fromInput=true 时从输入框派发，走真实的冒泡路径（输入框会 stopPropagation 接管键盘）
+      const target = fromInput && memoInput ? memoInput : window;
+      const before = window.__petContextMenuCount || 0;
+      const ev = new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true, cancelable: true });
+      target.dispatchEvent(ev);
+      const after = window.__petContextMenuCount || 0;
+      return {
+        count: after,
+        delta: after - before,               // 本次按键是否真的触发了菜单（0 = 被输入框吞掉）
+        from: window.__petContextMenuFrom || null,
+        dispatchedOn: fromInput ? 'memoInput' : 'window',
+        defaultPrevented: ev.defaultPrevented,
+      };
     },
     realClick: () => {
       const r = pet.getBoundingClientRect();
@@ -482,6 +673,14 @@
       window.pet.dragEnd();
       return { bounds, ok: true };
     },
+    // 待办面板测试入口
+    memoOpen: () => { openMemo(); return memoSnapshot(); },
+    memoClose: () => { closeMemo(); return memoSnapshot(); },
+    memoToggle: () => { toggleMemo(); return memoSnapshot(); },
+    memoAdd: (text) => ({ ...memoSnapshot(), added: addTask(text) }),
+    memoComplete: (index) => ({ ...memoSnapshot(), started: completeTask(index) }),
+    memoClear: () => { memoState.tasks = []; saveTasks(); renderMemo(); return memoSnapshot(); },
+    memoSnapshot,
     state: () => ({
       petClasses: pet.className,
       bubbleShown: bubble.classList.contains('show'),

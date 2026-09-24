@@ -12,6 +12,10 @@ const AUTOTEST = process.env.DSH_PET_AUTOTEST === '1';
 const WIN_W = 200;
 const WIN_H = 250;
 const MARGIN = 30;
+// 待办面板展开时的窗口尺寸（面板 288 宽 + 内外边距，高度需容纳面板 + 角色）
+const PANEL_W = 312;
+const PANEL_H = 430;
+let panelOpen = false;
 
 let win = null;
 let clickThrough = null;
@@ -186,12 +190,13 @@ function createWindow() {
       // 等动画/字体稳定后再截图
       setTimeout(() => runSelfCheck(), 1500);
       // 兜底：绝不允许自检挂死
+      // 面板测试要等窗口缩放 + 穿透掩码重算，整体耗时比以前长，所以时限放宽到 60 秒
       setTimeout(() => {
         if (!app.__selfCheckDone) {
           console.log('[AUTOTEST] TIMEOUT: 自检未完成，强制收尾');
           app.exit(3);
         }
-      }, 15000);
+      }, 60000);
     });
   }
   return win;
@@ -340,6 +345,54 @@ ipcMain.handle('pet:get-bounds', () => {
 // 素材清单：主进程读磁盘 → 渲染层用（避开 CSP 对 fetch 的限制）
 ipcMain.handle('pet:asset-manifest', () => loadAnimationManifest(path.join(ROOT, 'assets')));
 
+// 待办面板：展开/收起时改变窗口尺寸。
+// 注意两个必须处理的点：
+//   1) 改尺寸后必须重算穿透掩码，否则点击判定范围还停留在旧尺寸上
+//   2) 窗口要往"能装下面板"的方向挪（面板从窗口顶部展开），并夹在工作区内
+ipcMain.on('pet:set-panel', (_e, payload) => {
+  if (!win || win.isDestroyed()) return;
+  const open = !!(payload && payload.open);
+  if (open === panelOpen) return;
+  panelOpen = open;
+  const work = screen.getPrimaryDisplay().workArea;
+  const b = win.getBounds();
+  const w = open ? PANEL_W : WIN_W;
+  const h = open ? PANEL_H : WIN_H;
+
+  let x = b.x;
+  const y0 = b.y; // 窗口顶部固定，面板从顶部展开，所以只改高宽
+  // 保证完整落在工作区内。
+  // ⚠️ 必须用"实际尺寸"而不是设计尺寸来夹取：Windows 会把窗口吸到物理像素网格，
+  //    实际会大 1~2px，用设计值算会导致右下角刚好越界。
+  const actualW = Math.round(w * (screen.getPrimaryDisplay().scaleFactor || 1)) / (screen.getPrimaryDisplay().scaleFactor || 1);
+  const actualH = actualW === 0 ? h : Math.round(h * (screen.getPrimaryDisplay().scaleFactor || 1)) / (screen.getPrimaryDisplay().scaleFactor || 1);
+  const clampW = Math.ceil(actualW) + 1;
+  const clampH = Math.ceil(actualH) + 1;
+  x = Math.min(Math.max(x, work.x), work.x + work.width - clampW);
+  let y = Math.min(Math.max(y0, work.y), work.y + work.height - clampH);
+  win.setBounds({ x: Math.round(x), y: Math.round(y), width: w, height: h });
+  // 尺寸锁存也要跟着更新，否则之后拖动会把窗口"缩回"旧尺寸
+  win.__designSize = { w, h };
+  logInput({ src: 'main', type: 'panel',
+    detail: `${open ? '展开' : '收起'}待办面板 → 窗口 ${w}x${h} @(${x},${y}) 夹取上限=${work.x + work.width - clampW},${work.y + work.height - clampH}` });
+
+  // 尺寸变了 → 掩码必须重算（等布局稳定）
+  setTimeout(() => {
+    if (!clickThrough) return;
+    clickThrough.refreshMask()
+      .then((m) => {
+        logInput({ src: 'main', type: 'mask-refresh', detail: `面板切换后重算：覆盖率=${m.coverage} bbox=${JSON.stringify(m.bbox)}` });
+      })
+      .catch((err) => console.error('[穿透掩码] 面板切换后重算失败:', err && err.message));
+  }, 300);
+});
+
+// 面板里的输入框要能打字 → 需要把键盘焦点交给窗口
+ipcMain.on('pet:focus-window', () => {
+  if (!win || win.isDestroyed()) return;
+  win.focus();
+  win.webContents.focus();
+});
 // 形象变化后重算穿透掩码（渲染层加载完帧动画会请求一次）
 ipcMain.on('pet:refresh-mask', () => {
   if (!clickThrough) return;
@@ -439,6 +492,8 @@ async function runSelfCheck() {
     };
 
     const push = (name, pass, detail) => report.checks.push({ name, pass, detail });
+    const js = (code) => win.webContents.executeJavaScript(code);
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
     push('窗口可见', state.windowVisible === true, `visible=${state.windowVisible}`);
     push('永远置顶生效', state.alwaysOnTop === true, `alwaysOnTop=${state.alwaysOnTop}`);
@@ -494,6 +549,110 @@ async function runSelfCheck() {
       scanEdge(size.width - 2, 0, size.width - 1, size.height - 1);
       push('窗口没有边框（四边无粉红框线）', borderPink === 0,
         `扫描 ${scanned} 个边缘像素，粉红边框色=${borderPink}（>0 说明调试红框或 CSS 边框漏出来了）`);
+    }
+
+    // ---------- 待办面板断言 ----------
+    {
+      await js('window.__petTest.memoClear()');
+      await js('window.__petTest.memoClose()');
+      await wait(150);
+      const closed = await js('window.__petTest.memoSnapshot()');
+      push('面板默认收起', closed.open === false && closed.panelVisible === false,
+        `open=${closed.open} visible=${closed.panelVisible}`);
+
+      // 点击桌宠应展开面板
+      await js('window.__petTest.click()');
+      await wait(500);
+      const opened = await js('window.__petTest.memoSnapshot()');
+      push('左键点击桌宠展开待办面板', opened.open === true && opened.panelVisible === true,
+        `open=${opened.open} visible=${opened.panelVisible}`);
+      push('面板默认容量 5 栏、两列布局', opened.cap === 5 && opened.renderedRows === 5,
+        `容量=${opened.cap} 渲染栏位=${opened.renderedRows} 空栏位=${opened.emptyRows}`);
+      push('每栏都有勾选框', opened.boxCount === 5, `勾选框数=${opened.boxCount}`);
+      push('输入框获得键盘焦点（能打字）', opened.inputFocused === true,
+        `focused=${opened.inputFocused}`);
+      push('面板完整在窗口内（不会被裁掉）', opened.panelInViewport === true,
+        `panelRect=${JSON.stringify(opened.panelRect)}`);
+
+      // 添加任务（走真实的输入框回车路径）
+      const added = await js(`(() => {
+        const input = document.getElementById('memoInput');
+        const out = [];
+        for (const t of ['写文档', '修 bug', '喂桌宠']) {
+          input.focus();
+          input.value = t;
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          out.push(document.getElementById('memoList').querySelectorAll('.memo-item:not(.empty)').length);
+        }
+        return { counts: out };
+      })()`);
+      await wait(150);
+      const withTasks = await js('window.__petTest.memoSnapshot()');
+      push('回车可添加任务（顶部输入栏）', withTasks.count === 3 && added.counts.join(',') === '1,2,3',
+        `加入 ${withTasks.count} 条：${withTasks.tasks.join(' / ')}（逐次计数 ${added.counts.join(',')}）`);
+      push('任务按顺序落入下方栏位', withTasks.tasks[0] === '写文档' && withTasks.tasks[2] === '喂桌宠',
+        `tasks=${JSON.stringify(withTasks.tasks)}`);
+      push('空栏位数量随之减少', withTasks.emptyRows === 2, `空栏位=${withTasks.emptyRows}（5 栏 - 3 条）`);
+
+      // 勾选第 2 栏 → 完成并删除
+      await js('window.__petTest.memoComplete(1)');
+      await wait(450);
+      const afterDone = await js('window.__petTest.memoSnapshot()');
+      push('点击小方框＝完成任务并删除该栏',
+        afterDone.count === 2 && !afterDone.tasks.includes('修 bug') && afterDone.removedTotal === 1,
+        `剩余 ${afterDone.count} 条：${afterDone.tasks.join(' / ')}（累计删除 ${afterDone.removedTotal} 条）`);
+      push('删除后栏位重排且恢复空槽', afterDone.renderedRows === 5 && afterDone.emptyRows === 3,
+        `渲染栏位=${afterDone.renderedRows} 空栏位=${afterDone.emptyRows}`);
+
+      // 容量上限
+      // 容量上限：已有 2 条，容量 5 → 还能进 3 条，第 4 次起必须被拒
+      const beforeSnap = await js('window.__petTest.memoSnapshot()');
+      const MEMO_ROOM = Math.max(0, beforeSnap.cap - beforeSnap.count);
+      const fill = await js(`(() => {
+        const r = [];
+        for (let i = 0; i < 6; i++) r.push(window.__petTest.memoAdd('溢出测试' + i).added);
+        return r;
+      })()`);
+      await wait(150);
+      const full = await js('window.__petTest.memoSnapshot()');
+      const okCount = fill.filter((v) => v === true).length; // 注意：必须是严格 true 判定，元素是布尔值
+      push('超过 5 条时拒绝并提示', full.count === 5 && okCount === MEMO_ROOM,
+        `添加前 ${beforeSnap.count} 条 + 容量 ${beforeSnap.cap} → 应再接受 ${MEMO_ROOM} 条；6 次添加实际成功 ${okCount} 次；现 ${full.count}/5；提示="${full.foot}"`);
+
+      // 收起面板：窗口应还原尺寸
+      const boundsBeforeClose = win.getBounds();
+      await js('window.__petTest.memoClose()');
+      await wait(700);
+      const closedAgain = await js('window.__petTest.memoSnapshot()');
+      const boundsAfterClose = win.getBounds();
+      push('收起面板后还原窗口尺寸',
+        closedAgain.open === false && Math.abs(boundsAfterClose.width - WIN_W) <= 6 && Math.abs(boundsAfterClose.height - WIN_H) <= 6,
+        `窗口 ${boundsBeforeClose.width}x${boundsBeforeClose.height} → ${boundsAfterClose.width}x${boundsAfterClose.height}（设计 ${WIN_W}x${WIN_H}）`);
+
+      // 面板展开时窗口真的变大了（否则面板会被裁掉）
+      const bClosed = win.getBounds();
+      await js('window.__petTest.memoOpen()');
+      await wait(700);
+      const bOpen = win.getBounds();
+      const maskOpenState = clickThrough.getState();
+      push('面板展开时窗口随之变大', bOpen.width > bClosed.width + 40 && bOpen.height > bClosed.height + 80,
+        `${bClosed.width}x${bClosed.height} → ${bOpen.width}x${bOpen.height}`);
+      push('窗口变大后仍在工作区内', (() => {
+        const wa = screen.getPrimaryDisplay().workArea;
+        return bOpen.x >= wa.x && bOpen.y >= wa.y &&
+          bOpen.x + bOpen.width <= wa.x + wa.width && bOpen.y + bOpen.height <= wa.y + wa.height;
+      })(), `bounds=${bOpen.x},${bOpen.y},${bOpen.width},${bOpen.height}`);
+      push('面板展开后掩码已重算（实体范围跟上新尺寸）',
+        maskOpenState.maskReady === true && (maskOpenState.stats.maskCoverage || 0) > 0.03,
+        `实体占比=${maskOpenState.stats.maskCoverage} bbox=${JSON.stringify(maskOpenState.stats.maskBbox)}`);
+
+      report.memo = { opened, withTasks, afterDone, full };
+      await js('window.__petTest.memoClear()');
+      await js('window.__petTest.memoClose()');
+      await wait(900); // 等窗口缩回、掩码重算完成，否则后面的交互测试会点到面板上
+      const settled = await js('window.__petTest.memoSnapshot()');
+      push('面板收起后不再遮挡桌宠（测试隔离）', settled.open === false && settled.panelVisible === false,
+        `open=${settled.open} visible=${settled.panelVisible}；窗口=${win.getBounds().width}x${win.getBounds().height}`);
     }
 
     // ---------- 鼠标穿透断言 ----------
@@ -594,14 +753,28 @@ async function runInteractionTest() {
   const js = (code) => win.webContents.executeJavaScript(code);
   // 窗口尺寸漂移追踪：找出 +1px 是哪一步引入的
   const boundsTrace = [];
-  const trace = (tag) => { const b = win.getBounds(); boundsTrace.push(`${tag}=${b.width}x${b.height}`); return b; };
+  const trace = (tag) => {
+    if (!win || win.isDestroyed()) { boundsTrace.push(`${tag}=窗口已关闭`); return null; }
+    const b = win.getBounds();
+    boundsTrace.push(`${tag}=${b.width}x${b.height}`);
+    return b;
+  };
   trace('交互开始');
 
   await js('window.__petTest.click()');
   await wait(180);
   let s = await js('window.__petTest.state()');
-  push('点击后出气泡', s.bubbleShown === true && s.bubbleText.length > 0, `text="${s.bubbleText}" shown=${s.bubbleShown}`);
-  push('点击触发蹦跳动画', /hop/.test(s.petClasses), `classes="${s.petClasses}"`);
+  // ---------- 攻击面 1：左键点击（已改为待办面板） ----------
+  await js('window.__petTest.memoClose()');
+  await wait(600);
+  const beforeClickPanel = await js('window.__petTest.memoSnapshot()');
+  await js('window.__petTest.click()');
+  await wait(400);
+  const afterClickPanel = await js('window.__petTest.memoSnapshot()');
+  push('点击桌宠打开待办面板', afterClickPanel.open === true && afterClickPanel.panelVisible === true,
+    `before open=${beforeClickPanel.open} → after open=${afterClickPanel.open} visible=${afterClickPanel.panelVisible}`);
+  await js('window.__petTest.memoClose()');
+  await wait(800);
 
   await js('window.__petTest.action("headpat")');
   await wait(180);
@@ -619,10 +792,20 @@ async function runInteractionTest() {
 
   // ---------- 穿透 + 手动拖动链路 ----------
   const before = win.getBounds();
-  const hitOnPet = await js('window.__petTest.probeHit(100, 120)');   // 角色所在区域
-  const hitOnAir = await js('window.__petTest.probeHit(4, 4)');       // 左上留白
-  push('渲染层判定：角色上=命中实体', hitOnPet.hit === true, `hit=${hitOnPet.hit} element=${hitOnPet.element}`);
-  push('渲染层判定：留白处=空气', hitOnAir.hit === false, `hit=${hitOnAir.hit} element=${hitOnAir.element}`);
+  // 取样点从角色位置动态算（不能写死坐标：面板展开时窗口尺寸和角色位置都会变）
+  const probe = await js(`(() => {
+    const r = document.getElementById('pet').getBoundingClientRect();
+    return {
+      center: [Math.round(r.left + r.width / 2), Math.round(r.top + Math.min(40, r.height / 2))],
+      air: [2, 2],
+      petRect: { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) },
+    };
+  })()`);
+  const hitOnPet = await js(`window.__petTest.probeHit(${probe.center[0]}, ${probe.center[1]})`);
+  const hitOnAir = await js(`window.__petTest.probeHit(${probe.air[0]}, ${probe.air[1]})`);
+  push('渲染层判定：角色上=命中实体', hitOnPet.hit === true,
+    `取样(${probe.center.join(',')}) hit=${hitOnPet.hit} element=${hitOnPet.element} petRect=${JSON.stringify(probe.petRect)}`);
+  push('渲染层判定：留白处=空气', hitOnAir.hit === false, `取样(${probe.air.join(',')}) hit=${hitOnAir.hit} element=${hitOnAir.element}`);
 
   // 反复拖动 5 轮，验证"窗口不会越拖越大"（Windows 高 DPI 取整误差累积的坑）
   const sizes = [];
@@ -651,40 +834,26 @@ async function runInteractionTest() {
   push('穿透切换有真实调用记录', csAfter.stats.toggles >= 0, `累计切换 ${csAfter.stats.toggles} 次，探针次数 ${csAfter.stats.probes}`);
   clickThrough.probe(); // 还原真实状态
 
-  // ---------- 真实事件链（真人操作路径，旧版自检漏掉的就是这条） ----------
-  const stateBefore = await js('window.__petTest.state()');
+  // ---------- 真实事件链：左键已改为"展开待办面板" ----------
+  const memoBeforeClick = await js('window.__petTest.memoSnapshot()');
   const realClick = await js('window.__petTest.realClick()');
   trace('realClick后');
-  await wait(150);
-  let s2 = await js('window.__petTest.state()');
-  const clickDelta = s2.clickCount - stateBefore.clickCount;
-  push('真实点击链(mousedown→mouseup→click)触发 click', clickDelta === 1, `click 计数 +${clickDelta}`);
-  push('真实点击后出气泡', s2.bubbleShown === true && s2.bubbleText.length > 0, `text="${s2.bubbleText}" shown=${s2.bubbleShown}`);
-
-  // 「class 加上」≠「屏幕上看得见」——必须等过渡跑完再看透明度和几何是否在视口内
-  await wait(400);
-  let sVis = await js('window.__petTest.state()');
-  push('气泡真的可见（透明度≈1）', sVis.bubbleOpacity >= 0.95, `opacity=${sVis.bubbleOpacity}`);
-  push('气泡完整在窗口视口内', sVis.bubbleInViewport === true, `rect=${JSON.stringify(sVis.bubbleRect)}`);
-  // 以像素证据再验一次：截图里气泡区域必须有不透明像素
-  const bubbleShot = await win.webContents.capturePage();
-  const bmp = bubbleShot.toBitmap();
-  const shotW = bubbleShot.getSize().width;
-  const dprNow = await js('window.devicePixelRatio');
-  const bx = Math.round(sVis.bubbleRect.left * dprNow), by = Math.round(sVis.bubbleRect.top * dprNow);
-  const bw = Math.round(sVis.bubbleRect.w * dprNow), bh = Math.round(sVis.bubbleRect.h * dprNow);
-  let bubblePixels = 0;
-  for (let y = by; y < by + bh; y++) {
-    for (let x = bx; x < bx + bw; x++) {
-      if (y < 0 || x < 0 || y >= bubbleShot.getSize().height || x >= shotW) continue;
-      if (bmp[(y * shotW + x) * 4 + 3] >= 16) bubblePixels++;
-    }
-  }
-  fs.writeFileSync(path.join(ARTIFACTS, 'shot-bubble.png'), bubbleShot.toPNG());
-  push('截图里气泡区域确实被画出来了（像素证据）', bubblePixels > bw * bh * 0.5,
-    `气泡区域不透明像素 ${bubblePixels}/${bw * bh}（占比 ${(bubblePixels / (bw * bh) * 100).toFixed(0)}%）→ artifacts/shot-bubble.png`);
-  push('快速点击后未卡在拖拽态（race 回归断言）', realClick.dragging === false && s2.dragging === false,
-    `点击瞬间 dragging=${realClick.dragging}，150ms 后 dragging=${s2.dragging}`);
+  await wait(300);
+  const memoAfterClick = await js('window.__petTest.memoSnapshot()');
+  push('真实点击链(mousedown→mouseup→click)触发 click',
+    memoAfterClick.opens + memoAfterClick.closes > memoBeforeClick.opens + memoBeforeClick.closes,
+    `面板 开/关 次数 ${memoBeforeClick.opens}/${memoBeforeClick.closes} → ${memoAfterClick.opens}/${memoAfterClick.closes}`);
+  push('左键点击＝展开待办面板（替代原随机台词）',
+    memoAfterClick.open === true && memoAfterClick.panelVisible === true,
+    `open=${memoAfterClick.open} visible=${memoAfterClick.panelVisible}`);
+  push('快速点击后未卡在拖拽态（race 回归断言）', realClick.dragging === false,
+    `点击瞬间 dragging=${realClick.dragging}`);
+  // 收起面板（等窗口缩回），避免后续交互断言点到面板上
+  await js('window.__petTest.memoClose()');
+  await wait(800);
+  const memoClosedNow = await js('window.__petTest.memoSnapshot()');
+  push('收起面板后桌宠恢复可交互', memoClosedNow.open === false && memoClosedNow.panelVisible === false,
+    `open=${memoClosedNow.open} 窗口=${win.getBounds().width}x${win.getBounds().height}`);
 
   // ---------- 右键菜单 ----------
   const menuBefore = menuLog.opened;
@@ -702,9 +871,13 @@ async function runInteractionTest() {
   //                ② 无阈值即拖动，点一下的微抖动让窗口跟着动 → click 也不产生
   const jitterClick = await js('window.__petTest.realClickWithJitter(3)');
   trace('jitterClick后');
-  await wait(150);
-  push('微抖动点击(±3px)仍能出气泡（根因①回归）', jitterClick.sayDelta === 1 && jitterClick.clickDelta === 1,
-    `say +${jitterClick.sayDelta}, click +${jitterClick.clickDelta}`);
+  await wait(250);
+  const memoAfterJitter = await js('window.__petTest.memoSnapshot()');
+  push('微抖动点击(±3px)仍能触发面板（根因①回归）',
+    jitterClick.clickDelta === 1 && memoAfterJitter.open === true,
+    `click +${jitterClick.clickDelta}，面板 open=${memoAfterJitter.open}`);
+  await js('window.__petTest.memoClose()');
+  await wait(800);
 
   const dragChain = await js('window.__petTest.realDrag(30)');
   trace('realDrag后');
@@ -779,11 +952,29 @@ async function runInteractionTest() {
   push('菜单项都绑定了动作', clickables >= 7, `可点击项 ${clickables}`);
 
   // 兜底入口：Ctrl+M（不依赖鼠标，万一物理右键进不来也有办法开菜单）
+  // 注意：面板打开时输入框会接收键盘输入并 stopPropagation（避免打字误触全局快捷键），
+  //       所以这条要先收起面板再测。
+  await js('window.__petTest.memoClose()');
+  await wait(700);
   const kbBefore = menuLog.opened;
   const kb = await js('window.__petTest.keyboardMenu()');
   await wait(200);
-  push('Ctrl+M 兜底入口可用', kb.from === 'keyboard' && menuLog.opened === kbBefore + 1,
+  push('Ctrl+M 兜底入口可用（面板收起时）', kb.from === 'keyboard' && menuLog.opened === kbBefore + 1,
     `来源=${kb.from} 菜单次数 ${kbBefore} → ${menuLog.opened}`);
+
+  // 面板打开时，键盘输入应被面板接管（不能误触全局快捷键）
+  await js('window.__petTest.memoOpen()');
+  await wait(600);
+  const menuBeforeInPanel = menuLog.opened;
+  const kbInPanel = await js('window.__petTest.keyboardMenu(true)');
+  await wait(200);
+  const memoStillOpen = await js('window.__petTest.memoSnapshot()');
+  push('面板打开时键盘输入被输入框接管（不误触全局菜单）',
+    kbInPanel.delta === 0 && kbInPanel.dispatchedOn === 'memoInput' &&
+    menuLog.opened === menuBeforeInPanel && memoStillOpen.open === true,
+    `从 ${kbInPanel.dispatchedOn} 派发的按键未触发菜单（计数增量 ${kbInPanel.delta}，主进程菜单次数保持 ${menuLog.opened}）；面板仍展开=${memoStillOpen.open}`);
+  await js('window.__petTest.memoClose()');
+  await wait(700);
 
   // 真机右键诊断快照（主人若再遇到右键无效，这个计数能告诉人家事件卡在哪一层）
   const diagSnap = await js('window.__petRightDiag ? ({...window.__petRightDiag}) : null');
