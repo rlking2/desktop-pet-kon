@@ -16,7 +16,8 @@
     "verify": "npm run autotest && npm run inspect",
     "assets:list": "node scripts/list-assets.js",
     "assets:bg": "node scripts/analyze-bg.js",
-    "cutout": "node scripts/cutout.js --size=130",
+    "cutout": "node scripts/cutout.js",
+    "cutout:small": "node scripts/cutout.js --size=130",
     "cutout:preview": "node scripts/cutout.js --preview",
     "sheet": "node scripts/make-contact-sheet.js"
   },

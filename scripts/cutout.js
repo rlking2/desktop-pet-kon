@@ -22,7 +22,7 @@ const OUTDIR = path.join(ASSETS, 'cutout');
 
 // ---------------- 参数 ----------------
 const args = process.argv.slice(2);
-const opt = { tol: 34, size: 130, feather: 1, preview: false, debug: false, files: [] };
+const opt = { tol: 34, size: 0, feather: 1, preview: false, debug: false, files: [] };
 for (const a of args) {
   if (a === '--preview') opt.preview = true;
   else if (a === '--debug') opt.debug = true;
@@ -296,27 +296,44 @@ function cutout(img, bg, opt2) {
 }
 
 // ---------------- 裁剪 + 缩放 ----------------
+// ⚠️ 清晰度的关键（主人反馈"清晰度不够"后才明白）：
+//   1) **不要在这里把图缩小**。原图 500~900px 缩到 130px 会丢掉 80% 像素，细节全糊。
+//      渲染层用 canvas 缩放质量远好于人家手写的最邻近/面积平均。
+//   2) 显示器 150% 缩放（DPR=1.5）时，130 CSS px 的显示框实际需要 **195 物理像素**。
+//      如果素材只有 130px，浏览器还得放大 → 更糊。
+//   所以：**只裁掉四周空白，分辨率原样保留**（targetSize=0 表示不缩放）。
 function trimAndScale(rgba, W, H, targetSize) {
+  // 裁切阈值用 40 而不是 8：抠图时在描边与画面交界处会留下极低 alpha 的羽化像素，
+  // 用 8 当阈值会被这些残边撑住边界，导致"裁不动"（实测 505x774 原样输出）。
+  const ALPHA_KEEP = 40;
   let minX = W, minY = H, maxX = -1, maxY = -1;
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      if (rgba[(y * W + x) * 4 + 3] > 8) {
+      if (rgba[(y * W + x) * 4 + 3] >= ALPHA_KEEP) {
         if (x < minX) minX = x; if (x > maxX) maxX = x;
         if (y < minY) minY = y; if (y > maxY) maxY = y;
       }
     }
   }
-  if (maxX < 0) return { rgba: Buffer.alloc(targetSize * targetSize * 4), w: targetSize, h: targetSize, trimmed: null };
-  // 留 4px 边距
-  const pad = 4;
+  if (maxX < 0) return { rgba: Buffer.alloc(4), w: 1, h: 1, trimmed: null, scaled: false };
+  const pad = 2;
   minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
   maxX = Math.min(W - 1, maxX + pad); maxY = Math.min(H - 1, maxY + pad);
   const cw = maxX - minX + 1, ch = maxY - minY + 1;
-  // 等比缩放到 targetSize（最长边）
+
+  // targetSize = 0（默认）→ 保持原分辨率，只裁剪
+  if (!targetSize || targetSize <= 0 || Math.max(cw, ch) <= targetSize) {
+    const dst = Buffer.alloc(cw * ch * 4);
+    for (let y = 0; y < ch; y++) {
+      rgba.copy(dst, y * cw * 4, ((y + minY) * W + minX) * 4, ((y + minY) * W + minX + cw) * 4);
+    }
+    return { rgba: dst, w: cw, h: ch, trimmed: { x: minX, y: minY, w: cw, h: ch }, scaled: false };
+  }
+
+  // 显式要求缩放时才缩（且用面积平均 + 预乘 alpha，避免边缘发灰）
   const scale = targetSize / Math.max(cw, ch);
   const tw = Math.max(1, Math.round(cw * scale)), th = Math.max(1, Math.round(ch * scale));
   const dst = Buffer.alloc(tw * th * 4);
-  // 面积平均（比最近邻好，缩小时不闪）
   for (let y = 0; y < th; y++) {
     for (let x = 0; x < tw; x++) {
       const sx0 = minX + Math.floor(x / scale), sx1 = Math.min(maxX, minX + Math.ceil((x + 1) / scale) - 1);
@@ -332,12 +349,12 @@ function trimAndScale(rgba, W, H, targetSize) {
       }
       const di = (y * tw + x) * 4;
       const aAvg = a / n;
-      const wsum = aAvg > 0 ? aAvg / 255 * n : 1;
+      const wsum = aAvg > 0 ? (a / 255) || 1 : 1;
       dst[di] = Math.round(r / wsum); dst[di + 1] = Math.round(g / wsum); dst[di + 2] = Math.round(b / wsum);
       dst[di + 3] = Math.round(aAvg);
     }
   }
-  return { rgba: dst, w: tw, h: th, trimmed: { x: minX, y: minY, w: cw, h: ch } };
+  return { rgba: dst, w: tw, h: th, trimmed: { x: minX, y: minY, w: cw, h: ch }, scaled: true };
 }
 
 // ---------------- 主流程 ----------------
@@ -370,7 +387,7 @@ if (!files.length) {
 }
 if (!opt.preview) fs.mkdirSync(OUTDIR, { recursive: true });
 
-console.log(`自动抠图（容差 ${opt.tol}，目标尺寸 ${opt.size}px）\n`);
+console.log(`自动抠图（容差 ${opt.tol}，${opt.size > 0 ? '缩放到 ' + opt.size + 'px' : '保持原分辨率（推荐，清晰度最好）'}）\n`);
 let okCount = 0;
 const report = [];
 for (const f of files) {
