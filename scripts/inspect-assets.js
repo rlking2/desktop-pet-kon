@@ -110,6 +110,38 @@ function analyzeFrame(img) {
   };
 }
 
+// 双线性缩放（带 alpha 加权，避免透明边缘发灰）
+function scaleBilinear(rgba, W, H, scale) {
+  const nw = Math.max(1, Math.round(W * scale));
+  const nh = Math.max(1, Math.round(H * scale));
+  const out = Buffer.alloc(nw * nh * 4);
+  for (let y = 0; y < nh; y++) {
+    const sy = (y + 0.5) / scale - 0.5;
+    const y0 = Math.max(0, Math.min(H - 1, Math.floor(sy)));
+    const y1 = Math.min(H - 1, y0 + 1);
+    const fy = Math.max(0, Math.min(1, sy - Math.floor(sy)));
+    for (let x = 0; x < nw; x++) {
+      const sx = (x + 0.5) / scale - 0.5;
+      const x0 = Math.max(0, Math.min(W - 1, Math.floor(sx)));
+      const x1 = Math.min(W - 1, x0 + 1);
+      const fx = Math.max(0, Math.min(1, sx - Math.floor(sx)));
+      const i00 = (y0 * W + x0) * 4, i01 = (y0 * W + x1) * 4;
+      const i10 = (y1 * W + x0) * 4, i11 = (y1 * W + x1) * 4;
+      const w00 = (1 - fx) * (1 - fy), w01 = fx * (1 - fy), w10 = (1 - fx) * fy, w11 = fx * fy;
+      const a00 = rgba[i00 + 3] / 255, a01 = rgba[i01 + 3] / 255;
+      const a10 = rgba[i10 + 3] / 255, a11 = rgba[i11 + 3] / 255;
+      const aSum = w00 * a00 + w01 * a01 + w10 * a10 + w11 * a11;
+      const di = (y * nw + x) * 4;
+      if (aSum <= 0.0001) { out[di + 3] = 0; continue; }
+      out[di] = Math.round((rgba[i00] * w00 * a00 + rgba[i01] * w01 * a01 + rgba[i10] * w10 * a10 + rgba[i11] * w11 * a11) / aSum);
+      out[di + 1] = Math.round((rgba[i00 + 1] * w00 * a00 + rgba[i01 + 1] * w01 * a01 + rgba[i10 + 1] * w10 * a10 + rgba[i11 + 1] * w11 * a11) / aSum);
+      out[di + 2] = Math.round((rgba[i00 + 2] * w00 * a00 + rgba[i01 + 2] * w01 * a01 + rgba[i10 + 2] * w10 * a10 + rgba[i11 + 2] * w11 * a11) / aSum);
+      out[di + 3] = Math.round(aSum * 255);
+    }
+  }
+  return { rgba: out, w: nw, h: nh };
+}
+
 // 把一帧按偏移画进统一画布
 function blitTo(dst, dstW, dstH, src, srcW, srcH, offX, offY) {
   for (let y = 0; y < srcH; y++) {
@@ -239,8 +271,11 @@ function loadGroups() {
     const rest = imageFiles.filter((n) => !sheetFiles.has(n)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
     // 2) 目录里的散帧序列
+    //    ⚠️ 踩坑：这里必须 `files: rest.slice()`，不能直接传 `rest` 再 `rest.length = 0` ——
+    //    后者清空的是**同一个数组对象**，组里的 files 会被一起清空（files[0] 变 undefined），
+    //    症状是 "The path argument must be of type string. Received undefined"。
     if (label && rest.length > 1) {
-      groups.push({ name: label, kind: 'sequence', dir, files: rest });
+      groups.push({ name: label, kind: 'sequence', dir, files: rest.slice() });
       rest.length = 0;
     }
 
@@ -262,6 +297,11 @@ function loadGroups() {
   }
 
   scanDir(ASSETS, '', 0);
+  if (process.env.DEBUG_GROUPS === '1') {
+    console.log('[调试] 扫描到的素材组: ' + JSON.stringify(groups.map((g) => ({
+      name: g.name, kind: g.kind, dir: g.dir, files: g.files && g.files.length, file: g.file,
+    })), null, 2));
+  }
   return { groups, loose };
 }
 
@@ -370,11 +410,27 @@ function inspectGroup(group, opts) {
   const canvasW = Math.max(...result.frames.map((f) => f.bbox ? f.bbox.w : 0)) + pad * 2;
   const canvasH = Math.max(...result.frames.map((f) => f.bbox ? f.bbox.h : 0)) + pad * 2;
   result.canvas = { width: canvasW, height: canvasH };
+
+  // 主体尺寸一致性检查：真人照片/多角度素材常见"每张拍的距离不一样"，
+  // 直接按包围盒对齐会导致播放时**人物忽大忽小**。
+  const bboxWs = result.frames.map((f) => (f.bbox ? f.bbox.w : 0)).filter(Boolean);
+  const bboxHs = result.frames.map((f) => (f.bbox ? f.bbox.h : 0)).filter(Boolean);
+  const sizeRatio = bboxHs.length ? +(Math.max(...bboxHs) / Math.min(...bboxHs)).toFixed(2) : 1;
+  result.sizeRatio = sizeRatio;
+  if (sizeRatio > 1.15) {
+    result.warnings.push(`主体高度相差 ${sizeRatio} 倍（${Math.min(...bboxHs)}~${Math.max(...bboxHs)}px）`
+      + ' → 直接播放会"忽大忽小"；用 --normalize-height 按主体高度统一（人家推荐）');
+  }
+
   result.aligned = result.frames.map((f) => {
     // 以"内容包围盒"对齐：每帧主体贴到画布中心（避免原图四周留白不一致导致抖动）
     const offX = f.bbox ? Math.round((canvasW - f.bbox.w) / 2 - f.bbox.minX) : 0;
     const offY = f.bbox ? Math.round((canvasH - f.bbox.h) / 2 - f.bbox.minY) : 0;
-    return { index: f.index, file: f.file, offsetX: offX, offsetY: offY };
+    // 按主体高度统一时，每帧要额外缩放，让主体的高度都等于最高那一帧
+    const scale = (opts.normalizeHeight && f.bbox && bboxHs.length)
+      ? Math.max(...bboxHs) / f.bbox.h
+      : 1;
+    return { index: f.index, file: f.file, offsetX: offX, offsetY: offY, scale: +scale.toFixed(4) };
   });
 
   if (opts.write) {
@@ -385,8 +441,18 @@ function inspectGroup(group, opts) {
     const written = [];
     for (const f of result.frames) {
       const a = result.aligned.find((x) => x.index === f.index);
+      // 需要统一主体大小时，先把这一帧按 scale 缩放（双线性，保清晰度），再贴到统一画布
+      let srcRgba = f._img.rgba, srcW = f.width, srcH = f.height;
+      let offX = a.offsetX, offY = a.offsetY;
+      if (a.scale && Math.abs(a.scale - 1) > 0.001) {
+        const scaled = scaleBilinear(f._img.rgba, f.width, f.height, a.scale);
+        // 缩放后主体位置跟着变：以包围盒左上角为锚点重算偏移
+        offX = Math.round((canvasW - (f.bbox ? f.bbox.w * a.scale : scaled.w)) / 2 - (f.bbox ? f.bbox.minX * a.scale : 0));
+        offY = Math.round((canvasH - (f.bbox ? f.bbox.h * a.scale : scaled.h)) / 2 - (f.bbox ? f.bbox.minY * a.scale : 0));
+        srcRgba = scaled.rgba; srcW = scaled.w; srcH = scaled.h;
+      }
       const canvas = Buffer.alloc(canvasW * canvasH * 4);
-      blitTo(canvas, canvasW, canvasH, f._img.rgba, f.width, f.height, a.offsetX, a.offsetY);
+      blitTo(canvas, canvasW, canvasH, srcRgba, srcW, srcH, offX, offY);
       const name = `frame-${String(f.index).padStart(3, '0')}.png`;
       fs.writeFileSync(path.join(framesDir, name), encodePNG(canvasW, canvasH, canvas));
       written.push(name);
@@ -429,6 +495,9 @@ function inspectGroup(group, opts) {
 // ---------- 主流程 ----------
 const args = process.argv.slice(2);
 const write = args.includes('--write');
+// --normalize-height：按主体高度统一各帧（真人照片/多角度素材常"每张拍的距离不同"，
+// 不做这一步播放时会忽大忽小）
+const normalizeHeight = args.includes('--normalize-height');
 const only = args.find((a) => !a.startsWith('--'));
 
 if (!fs.existsSync(ASSETS)) {
@@ -464,8 +533,8 @@ const KIND_LABEL = { sequence: '散帧序列', spritesheet: '精灵图', single:
 for (const g of groups) {
   console.log(`\n===== 素材「${g.name}」（${KIND_LABEL[g.kind] || g.kind}）=====`);
   let r;
-  try { r = inspectGroup(g, { write }); }
-  catch (err) { console.log(`FAIL  无法解析: ${err.message}`); anyProblem = true; continue; }
+  try { r = inspectGroup(g, { write, normalizeHeight }); }
+  catch (err) { console.log(`FAIL  无法解析: ${err.message}\n${err.stack}`); anyProblem = true; continue; }
 
   console.log(`帧数: ${r.frames.length}`);
   if (r.sheet) console.log(`精灵图: ${r.sheet.width}x${r.sheet.height}  ${r.sheet.cols}列 x ${r.sheet.rows}行  单帧 ${r.sheet.frameWidth}x${r.sheet.frameHeight}`);
