@@ -24,35 +24,51 @@ html, body {
 /* ---------- 气泡 ---------- */
 .bubble {
   position: absolute;
-  top: 6px;
+  top: 4px;
   left: 50%;
-  transform: translate(-50%, 0) scale(.9);
-  max-width: 186px;
-  padding: 5px 9px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, .96);
-  color: #14405f;
-  font-size: 10.5px;
-  line-height: 1.45;
+  transform: translate(-50%, 0) scale(.85);
+  max-width: 192px;
+  min-width: 112px;
+  padding: 7px 11px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .99);
+  color: #0d3a5c;
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 600;
   text-align: center;
   white-space: pre-wrap;
-  border: 2px solid #7fd0f5;
-  box-shadow: 0 3px 9px rgba(6, 40, 70, .3);
+  border: 2.5px solid #4fb6ec;
+  box-shadow: 0 4px 12px rgba(6, 40, 70, .45);
   opacity: 0;
-  transition: opacity .18s ease, transform .18s ease;
+  transition: opacity .15s ease, transform .15s cubic-bezier(.2, 1.6, .4, 1);
   pointer-events: none;
 }
 .bubble.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+
+/* 贴顶翻面：桌宠被拖到屏幕上方时，气泡改从角色下方弹出（否则会被画到屏幕外/窗口外） */
+.scene.flip .bubble {
+  top: auto;
+  bottom: 6px;
+  transform: translate(-50%, 0) scale(.85);
+}
+.scene.flip .bubble.show { transform: translate(-50%, 0) scale(1); }
+.scene.flip .bubble::after {
+  bottom: auto;
+  top: -9px;
+  border-top: 0;
+  border-bottom: 9px solid #4fb6ec;
+}
 .bubble::after {
   content: "";
   position: absolute;
   left: 50%;
-  bottom: -8px;
+  bottom: -9px;
   transform: translateX(-50%);
   width: 0; height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-top: 8px solid #7fd0f5;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-top: 9px solid #4fb6ec;
 }
 
 /* ---------- 角色（窗口 200x250，角色 130x130 留出穿透留白） ---------- */

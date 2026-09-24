@@ -62,8 +62,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: WIN_W,
     height: WIN_H,
-    x: work.x + work.width - WIN_W - MARGIN,
-    y: work.y + work.height - WIN_H - MARGIN,
+    x: process.env.DSH_PET_POS === 'top' ? work.x + 60 : work.x + work.width - WIN_W - MARGIN,
+    y: process.env.DSH_PET_POS === 'top' ? work.y + 2 : work.y + work.height - WIN_H - MARGIN,
     frame: false,
     transparent: true,
     resizable: false,
@@ -164,6 +164,17 @@ function createWindow() {
     logInput({ src: 'main', type: 'native-contextmenu', detail: '收到原生 context-menu 事件' });
     openMenu('native-webContents');
   });
+
+  // 气泡屏幕取证模式：必须在 loadFile 之前挂监听，否则 did-finish-load 已经过去了
+  if (process.env.DSH_PET_BUBBLE_PROBE === '1') {
+    win.webContents.once('did-finish-load', () => { setTimeout(() => runBubbleProbe(), 1500); });
+    setTimeout(() => {
+      if (!app.__bubbleProbeDone) {
+        console.log('[气泡探针] TIMEOUT：未完成，强制收尾');
+        app.exit(3);
+      }
+    }, 25000);
+  }
 
   win.loadFile(path.join(ROOT, 'renderer', 'index.html'));
 
@@ -720,6 +731,92 @@ async function runInteractionTest() {
     boundsTrace: boundsTrace.join(' → '),
     checks,
   };
+}
+
+// ---------- 气泡屏幕取证探针 ----------
+// 为什么需要它：capturePage() 抓的是窗口自绘缓冲，主人却是在**屏幕**上看气泡的。
+// 而且自动点击是合成事件，跟物理鼠标不完全同路。
+// 这个探针用「真实鼠标事件链触发 + desktopCapturer 抓真实桌面 + 像素判定」三条一起上。
+async function runBubbleProbe() {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const log = (s) => { console.log('[气泡探针] ' + s); logInput({ src: 'probe', type: 'bubble-step', detail: s }); };
+  try {
+    const { desktopCapturer } = require('electron');
+    await wait(1200);
+
+    // 1) 用真实鼠标事件链点击（不是 pet.click()）
+    const before = await win.webContents.executeJavaScript('window.__petTest.state()');
+    log(`点击前：气泡 shown=${before.bubbleShown} visibility=${before.bubbleVisibility}`);
+    const trigger = await win.webContents.executeJavaScript(`
+      (() => { const r = window.__petTest.realClick(); return r; })()
+    `);
+    log(`已发出真实事件链点击：clickDelta=${trigger.clickDelta} sayDelta=${trigger.sayDelta}`);
+
+    // 2) 等淡入完成
+    await wait(600);
+    const st = await win.webContents.executeJavaScript('window.__petTest.state()');
+    log(`点击后：shown=${st.bubbleShown} opacity=${st.bubbleOpacity} visibility=${st.bubbleVisibility} rect=${JSON.stringify(st.bubbleRect)}`);
+
+    // 3) 抓真实屏幕
+    const display = screen.getPrimaryDisplay();
+    const sf = display.scaleFactor || 1;
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: {
+      width: Math.round(display.size.width * sf), height: Math.round(display.size.height * sf) } });
+    if (!sources.length) throw new Error('desktopCapturer 没有返回屏幕源');
+    const shot = sources[0].thumbnail;
+    const size = shot.getSize();
+    const bmp = shot.toBitmap(); // BGRA
+    log(`屏幕截图 ${size.width}x${size.height}，显示器 ${display.size.width}x${display.size.height} @${sf}，显示原点 (${display.bounds.x},${display.bounds.y})`);
+
+    // 先判定气泡是否完整落在窗口视口内（出窗口 = 屏幕上看不见）
+    const wb0 = win.getBounds();
+    const inWindow =
+      st.bubbleRect.left >= 0 && st.bubbleRect.top >= 0 &&
+      st.bubbleRect.left + st.bubbleRect.w <= wb0.width &&
+      st.bubbleRect.top + st.bubbleRect.h <= wb0.height;
+    log(`气泡是否完整在窗口视口内：${inWindow ? '是' : '否！会被窗口裁掉'}`);
+
+    // 4) 换算气泡在屏幕上的物理像素区域
+    const wb = win.getBounds();
+    const bx = Math.round((wb.x + st.bubbleRect.left - display.bounds.x) * sf);
+    const by = Math.round((wb.y + st.bubbleRect.top - display.bounds.y) * sf);
+    const bw = Math.round(st.bubbleRect.w * sf);
+    const bh = Math.round(st.bubbleRect.h * sf);
+
+    let light = 0, blue = 0, total = 0;
+    for (let y = by; y < by + bh; y++) {
+      for (let x = bx; x < bx + bw; x++) {
+        if (y < 0 || x < 0 || y >= size.height || x >= size.width) continue;
+        const i = (y * size.width + x) * 4;
+        const b = bmp[i], g = bmp[i + 1], r = bmp[i + 2];
+        total++;
+        if (r > 235 && g > 235 && b > 235) light++;
+        else if (b > 180 && b > r + 30) blue++;
+      }
+    }
+    const lightPct = total ? +(light / total * 100).toFixed(1) : 0;
+    const bluePct = total ? +(blue / total * 100).toFixed(1) : 0;
+    log(`气泡屏幕区域 (${bx},${by}) ${bw}x${bh}：近白=${lightPct}% 天蓝边框=${bluePct}% (采样 ${total} 点)`);
+
+    const artDir = ARTIFACTS;
+    fs.mkdirSync(artDir, { recursive: true });
+    fs.writeFileSync(path.join(artDir, 'screen-capture.png'), shot.toPNG());
+    // 同时裁出气泡区域单独存一张，方便主人肉眼确认
+    try {
+      const crop = shot.crop({ x: Math.max(0, bx), y: Math.max(0, by), width: Math.max(1, bw), height: Math.max(1, bh) });
+      fs.writeFileSync(path.join(artDir, 'screen-bubble-crop.png'), crop.toPNG());
+    } catch { /* 裁剪失败不影响判定 */ }
+
+    const verdict = lightPct > 20;
+    log(`判定：${verdict ? 'PASS 气泡真的画在屏幕上了' : 'FAIL 屏幕上看不到气泡'}（近白占比 ${lightPct}%）`);
+    log('截图：artifacts/screen-capture.png，气泡区域裁图：artifacts/screen-bubble-crop.png');
+    app.__bubbleProbeDone = true;
+    app.exit(verdict ? 0 : 2);
+  } catch (err) {
+    console.error('[气泡探针] 异常:', err && err.stack || err);
+    app.__bubbleProbeDone = true;
+    app.exit(4);
+  }
 }
 
 app.whenReady().then(createWindow);

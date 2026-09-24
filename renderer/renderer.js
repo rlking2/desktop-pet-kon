@@ -70,10 +70,36 @@
 
   let bubbleTimer = null;
   let sayCount = 0;
+
+  // 轻音提示：气泡是视觉反馈，万一看漏了，声音不会漏。
+  // 用 WebAudio 现场合成，不需要素材文件；非常轻，且只响 90ms。
+  let audioCtx = null;
+  function chirp(freq = 880) {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return false;
+      if (!audioCtx) audioCtx = new Ctx();
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.5, t + 0.09);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.06, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + 0.14);
+      return true;
+    } catch { return false; }
+  }
+
   function say(text, ms = 2600) {
     sayCount++;
     bubble.textContent = text;
     bubble.classList.add('show');
+    chirp();
     clearTimeout(bubbleTimer);
     bubbleTimer = setTimeout(() => bubble.classList.remove('show'), ms);
   }
@@ -110,6 +136,23 @@
   window.addEventListener('mouseleave', () => {
     if (lastHit !== false) { lastHit = false; window.pet.pointerHit(false); }
   });
+
+  // ---------- 气泡自动翻面 ----------
+  // 气泡是窗口内的绝对定位元素，出不了窗口。窗口若贴近屏幕顶部，气泡就会被画到屏幕外。
+  // 所以窗口上半部分"悬空空间"不足时，改成从角色下方弹气泡。
+  const sceneEl = document.querySelector('.scene');
+  let flipShown = null;
+  function updateFlip() {
+    const topSpace = window.screenY;            // 窗口上方还有多少屏幕空间
+    const shouldFlip = topSpace < 70;           // 不够放气泡就翻到下面
+    if (shouldFlip === flipShown) return;
+    flipShown = shouldFlip;
+    sceneEl.classList.toggle('flip', shouldFlip);
+    dlog('bubble-flip', `窗口上方空间=${topSpace}px → 气泡在${shouldFlip ? '下方' : '上方'}`);
+  }
+  updateFlip();
+  window.addEventListener('mousemove', updateFlip);
+  setInterval(updateFlip, 500);
 
   // ---------- 手动拖动 ----------
   // 三个必须遵守的约束（都是踩坑换来的，见 devlog round-03）：
@@ -321,6 +364,7 @@
       bubbleText: bubble.textContent,
       // 关键：class 加上不等于"看得见"，必须看计算后的透明度
       bubbleOpacity: +(getComputedStyle(bubble).opacity),
+      bubbleVisibility: getComputedStyle(bubble).visibility,
       bubbleRect: (() => {
         const r = bubble.getBoundingClientRect();
         return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) };
