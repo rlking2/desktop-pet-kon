@@ -20,8 +20,9 @@ contextBridge.exposeInMainWorld('pet', {
   // 形象变了要重算穿透掩码（否则点击判定范围跟角色对不上）
   refreshMask: () => ipcRenderer.send('pet:refresh-mask'),
 
-  // 待办面板：展开时需要更大的窗口（并重算穿透掩码），收起时还原
+  // 待办面板：展开时需要更宽的窗口（并重算穿透掩码），收起时还原
   setPanel: (open) => ipcRenderer.send('pet:set-panel', { open: !!open }),
+  onPanelSide: (cb) => ipcRenderer.on('pet:panel-side', (_e, side) => cb(side)),
   focusWindow: () => ipcRenderer.send('pet:focus-window'),
 
   // 拖动（手动实现，因为 CSS drag 区域与逐像素穿透冲突）

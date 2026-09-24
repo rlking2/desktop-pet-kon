@@ -11,22 +11,40 @@ html, body {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
 }
 
+/* 场景布局：用 grid 固定列宽，位置完全确定，
+   不用 flex —— flex 的"拉伸/收缩"会让桌宠在窗口变宽时漂移（实测 810 → 1066）。
+   收起态：单列 158px（桌宠宽度 + 边距），靠窗口右边缘。
+   展开态：两列 [面板 300px][桌宠 158px]，桌宠仍在最右列 → 屏幕位置恒定不变。 */
 .scene {
   position: relative;
   width: 100vw;
   height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: 158px;          /* 只有桌宠一列 */
+  justify-content: end;                   /* 整体靠右：桌宠贴住窗口右边缘 */
+  align-items: end;
+}
+.scene.memo-open {
+  grid-template-columns: 300px 158px;     /* 面板在左，桌宠仍在最右列 → 她不动 */
+  grid-template-areas: "memo pet";
+}
+.scene.memo-open .memo { grid-area: memo; }
+.scene.memo-open .pet { grid-area: pet; }
+/* 面板放右侧（左边放不下时才会走到这里）：桌宠换到最左列 */
+.scene.memo-open.panel-right {
+  grid-template-columns: 158px 300px;
+  grid-template-areas: "pet memo";
+  justify-content: start;
 }
 
 /* ---------- 待办面板 ---------- */
 .memo {
-  position: absolute;
-  top: 6px;
-  left: 6px;
+  position: relative;
   width: 288px;
+  min-width: 288px;          /* 不许被压缩（实测被 flex 压到 279 导致布局错位） */
+  justify-self: center;
+  align-self: end;
+  margin: 6px;
   padding: 8px;
   border-radius: 10px;
   background: rgba(250, 252, 254, .98);
@@ -38,7 +56,21 @@ html, body {
   z-index: 10;
   -webkit-app-region: no-drag;
 }
-.memo.show { display: flex; }
+/* 面板出现动画：从"桌宠那一侧"滑出 + 淡入（主人说"直接在右边生成"，
+   但突变太生硬，给一个 180ms 的滑出，视觉上仍是"在右边生成"） */
+.memo.show {
+  display: flex;
+  animation: memo-in-right .18s ease-out;
+}
+.scene.panel-left .memo.show { animation-name: memo-in-left; }
+@keyframes memo-in-right {
+  from { opacity: 0; transform: translateX(-10px) scale(.97); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes memo-in-left {
+  from { opacity: 0; transform: translateX(10px) scale(.97); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
 
 .memo-head {
   display: flex;
@@ -207,7 +239,10 @@ html, body {
   position: relative;
   width: 130px;
   height: 150px;
-  margin-bottom: 16px;
+  min-width: 130px;
+  justify-self: center;
+  align-self: end;
+  margin: 12px 16px 16px 12px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -216,8 +251,6 @@ html, body {
   cursor: grab;
 }
 .pet.dragging { cursor: grabbing; }
-/* 面板展开时桌宠贴着窗口底部（面板在上方），收起时同样贴底 */
-.scene.memo-open .pet { margin-bottom: 8px; }
 
 /* 角色本体画布：所有形象都画在这里（帧动画 / 空位提示） */
 .sprite {

@@ -116,6 +116,7 @@
   if (memoCapEl) memoCapEl.textContent = String(MEMO_VISIBLE);
 
   const memoState = { open: false, tasks: [], renders: 0, removed: 0, added: 0, opens: 0, closes: 0, scrollable: false };
+  let panelSide = null;
 
   function loadTasks() {
     try {
@@ -215,8 +216,16 @@
   }
 
   function requestPanelSize(open) {
-    try { window.pet.setPanel(open); } catch (err) { dlog('memo', '请求面板尺寸失败: ' + (err && err.message)); }
+    try { return window.pet.setPanel(open); } catch (err) { dlog('memo', '请求面板尺寸失败: ' + (err && err.message)); return null; }
   }
+
+  // 主进程算完"面板放哪边"会回传，渲染层据此调整布局
+  // 默认（.memo-open 不带 panel-right）就是"面板在左、桌宠在右"→ 窗口向左扩展、桌宠不动
+  window.pet.onPanelSide((side) => {
+    panelSide = side || null;
+    sceneEl.classList.toggle('panel-right', side === 'right');
+    dlog('memo', `面板布局：${side === 'right' ? '窗口向右扩展，桌宠靠左' : '窗口向左扩展，桌宠靠右（位置不变）'}`);
+  });
 
   function openMemo() {
     if (memoState.open) return false;

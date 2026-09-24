@@ -12,10 +12,17 @@ const AUTOTEST = process.env.DSH_PET_AUTOTEST === '1';
 const WIN_W = 200;
 const WIN_H = 250;
 const MARGIN = 30;
-// 待办面板展开时的窗口尺寸（面板 288 宽 + 内外边距，高度需容纳面板 + 角色）
-const PANEL_W = 312;
-const PANEL_H = 430;
+// 待办面板：展开时把窗口**横向**扩展，面板出现在桌宠旁边（优先左侧，因为桌宠默认靠窗口右边）。
+//
+// 三个必须守住的点（都是踩坑换来的）：
+//   1) **桌宠的屏幕位置绝对不动** —— 主人点的是她，她就该待在那儿；动的是窗口边界和面板
+//   2) 窗口尺寸**必须真的变，且要够宽** —— 288px 的面板塞进 200px 的窗口会被裁掉；
+//      给 320px 也不够，因为 288 + 桌宠 130 会触发 flex 压缩 → 实测面板被压到 280 还溢出
+//   3) 改尺寸后**必须重算穿透掩码**，否则点击判定范围还停留在旧尺寸上
+const PANEL_W = 470;   // 面板列 300 + 桌宠列 158 + 余量 = 470（见 style.css 的 grid 列定义）
+const PANEL_H = 250;   // 与收起态同高（人物位置天然不变）
 let panelOpen = false;
+let panelSide = null;
 
 let win = null;
 let clickThrough = null;
@@ -345,36 +352,61 @@ ipcMain.handle('pet:get-bounds', () => {
 // 素材清单：主进程读磁盘 → 渲染层用（避开 CSP 对 fetch 的限制）
 ipcMain.handle('pet:asset-manifest', () => loadAnimationManifest(path.join(ROOT, 'assets')));
 
-// 待办面板：展开/收起时改变窗口尺寸。
-// 注意两个必须处理的点：
-//   1) 改尺寸后必须重算穿透掩码，否则点击判定范围还停留在旧尺寸上
-//   2) 窗口要往"能装下面板"的方向挪（面板从窗口顶部展开），并夹在工作区内
+// 待办面板：展开时把窗口**横向**扩展，面板出现在桌宠的右侧（右侧放不下就放左侧）。
+//
+// 三个必须守住的点（都是踩坑换来的）：
+//   1) **桌宠的屏幕位置绝对不动** —— 主人点的是她，她就该待在那儿；动的是窗口边界和面板
+//   2) 窗口尺寸**必须真的变** —— 否则 288px 宽的面板会被 200px 宽的窗口裁掉（实测 panelLeft=-9）
+//   3) 改尺寸后**必须重算穿透掩码**，否则点击判定范围还停留在旧尺寸上
+
 ipcMain.on('pet:set-panel', (_e, payload) => {
   if (!win || win.isDestroyed()) return;
   const open = !!(payload && payload.open);
   if (open === panelOpen) return;
   panelOpen = open;
-  const work = screen.getPrimaryDisplay().workArea;
-  const b = win.getBounds();
-  const w = open ? PANEL_W : WIN_W;
-  const h = open ? PANEL_H : WIN_H;
 
-  let x = b.x;
-  const y0 = b.y; // 窗口顶部固定，面板从顶部展开，所以只改高宽
-  // 保证完整落在工作区内。
-  // ⚠️ 必须用"实际尺寸"而不是设计尺寸来夹取：Windows 会把窗口吸到物理像素网格，
-  //    实际会大 1~2px，用设计值算会导致右下角刚好越界。
-  const actualW = Math.round(w * (screen.getPrimaryDisplay().scaleFactor || 1)) / (screen.getPrimaryDisplay().scaleFactor || 1);
-  const actualH = actualW === 0 ? h : Math.round(h * (screen.getPrimaryDisplay().scaleFactor || 1)) / (screen.getPrimaryDisplay().scaleFactor || 1);
-  const clampW = Math.ceil(actualW) + 1;
-  const clampH = Math.ceil(actualH) + 1;
-  x = Math.min(Math.max(x, work.x), work.x + work.width - clampW);
-  let y = Math.min(Math.max(y0, work.y), work.y + work.height - clampH);
-  win.setBounds({ x: Math.round(x), y: Math.round(y), width: w, height: h });
-  // 尺寸锁存也要跟着更新，否则之后拖动会把窗口"缩回"旧尺寸
-  win.__designSize = { w, h };
+  const display = screen.getPrimaryDisplay();
+  const work = display.workArea;      // 逻辑像素
+  const sf = display.scaleFactor || 1;
+  const b = win.getBounds();
+  // 用实际尺寸夹取（Windows 会把窗口吸到物理像素网格，实际比设计值大 1~2px）
+  const quant = (v) => Math.ceil(Math.round(v * sf) / sf) + 1;
+
+  let target;
+  if (open) {
+    const need = PANEL_W;
+    const h = PANEL_H; // 展开态固定高度（= 收起态设计高度），保证人物位置不变
+    // 优先放右侧（窗口左边不动 → 桌宠位置完全不变）
+    const spaceRight = work.x + work.width - (b.x + b.width);
+    const spaceLeft = b.x - work.x;
+    let side;
+    if (spaceRight >= need) side = 'right';
+    else if (spaceLeft >= need) side = 'left';
+    else side = spaceRight >= spaceLeft ? 'right' : 'left'; // 两边都不够就选宽的一边（会被夹取）
+
+    let x;
+    if (side === 'right') {
+      x = b.x;                                  // 桌宠位置不变
+      x = Math.min(x, work.x + work.width - quant(need)); // 右边放不下则整体左移
+    } else {
+      x = b.x + b.width - need;                 // 面板放左边：窗口左边外扩，桌宠位置不变
+      x = Math.max(x, work.x);
+    }
+    target = { x: Math.round(x), y: b.y, width: need, height: h, side };
+  } else {
+    // 收起：**明确还原到设计尺寸**（不能用当前高度——那样每开合一次就长高几像素，
+    // 实测连续开合把窗口从 250 累积到 270），并保持桌宠屏幕位置不变。
+    const side = win.__panelSide || 'right';
+    const x = side === 'right' ? b.x : b.x + b.width - WIN_W;
+    target = { x: Math.round(x), y: b.y, width: WIN_W, height: WIN_H, side: null };
+  }
+
+  win.__panelSide = target.side;
+  win.setBounds({ x: target.x, y: target.y, width: target.width, height: target.height });
+  win.__designSize = { w: target.width, h: target.height }; // 拖动时用它，避免"缩回"旧尺寸
+  win.webContents.send('pet:panel-side', target.side); // 通知渲染层调整布局方向
   logInput({ src: 'main', type: 'panel',
-    detail: `${open ? '展开' : '收起'}待办面板 → 窗口 ${w}x${h} @(${x},${y}) 夹取上限=${work.x + work.width - clampW},${work.y + work.height - clampH}` });
+    detail: `${open ? '展开' : '收起'}面板 → 窗口 ${target.width}x${target.height} @(${target.x},${target.y}) 侧=${target.side}` });
 
   // 尺寸变了 → 掩码必须重算（等布局稳定）
   setTimeout(() => {
@@ -670,19 +702,39 @@ async function runSelfCheck() {
         closedAgain.open === false && Math.abs(boundsAfterClose.width - WIN_W) <= 6 && Math.abs(boundsAfterClose.height - WIN_H) <= 6,
         `窗口 ${boundsBeforeClose.width}x${boundsBeforeClose.height} → ${boundsAfterClose.width}x${boundsAfterClose.height}（设计 ${WIN_W}x${WIN_H}）`);
 
-      // 面板展开时窗口真的变大了（否则面板会被裁掉）
+      // 面板展开时窗口真的变宽了（否则面板会被裁掉）
       const bClosed = win.getBounds();
+      const petScreenBefore = await js(`(() => {
+        const r = document.getElementById('pet').getBoundingClientRect();
+        return { x: Math.round(window.screenX + r.left), y: Math.round(window.screenY + r.top) };
+      })()`);
       await js('window.__petTest.memoOpen()');
-      await wait(700);
+      await wait(800);
       const bOpen = win.getBounds();
+      const geo = await js(`(() => {
+        const r = document.getElementById('pet').getBoundingClientRect();
+        const m = document.getElementById('memo').getBoundingClientRect();
+        return { petX: Math.round(window.screenX + r.left), petY: Math.round(window.screenY + r.top),
+                 panelLeft: Math.round(m.left), panelRight: Math.round(m.right),
+                 panelTop: Math.round(m.top), panelBottom: Math.round(m.bottom),
+                 panelW: Math.round(m.width),
+                 vp: [window.innerWidth, window.innerHeight],
+                 sceneClass: document.querySelector('.scene').className };
+      })()`);
       const maskOpenState = clickThrough.getState();
-      push('面板展开时窗口随之变大', bOpen.width > bClosed.width + 40 && bOpen.height > bClosed.height + 80,
+      push('面板展开时窗口横向变宽', bOpen.width > bClosed.width + 200,
         `${bClosed.width}x${bClosed.height} → ${bOpen.width}x${bOpen.height}`);
-      push('窗口变大后仍在工作区内', (() => {
+      // ★ 主人明确要求：点击后是"在右边生成面板"，人物本身不该移动
+      const petMoved = Math.max(Math.abs(geo.petX - petScreenBefore.x), Math.abs(geo.petY - petScreenBefore.y));
+      push('★面板展开时桌宠屏幕位置不动（主人要求）', petMoved <= 4,
+        `桌宠屏幕位置 (${petScreenBefore.x},${petScreenBefore.y}) → (${geo.petX},${geo.petY})，偏移 ${petMoved}px`);
+      push('面板完整落在窗口内（不被裁掉）', geo.panelLeft >= 0 && geo.panelRight <= geo.vp[0] && geo.panelW >= 280,
+        `面板 x=[${geo.panelLeft},${geo.panelRight}] 宽=${geo.panelW} 视口宽=${geo.vp[0]}`);
+      push('窗口变宽后仍在工作区内', (() => {
         const wa = screen.getPrimaryDisplay().workArea;
         return bOpen.x >= wa.x && bOpen.y >= wa.y &&
           bOpen.x + bOpen.width <= wa.x + wa.width && bOpen.y + bOpen.height <= wa.y + wa.height;
-      })(), `bounds=${bOpen.x},${bOpen.y},${bOpen.width},${bOpen.height}`);
+      })(), `bounds=${bOpen.x},${bOpen.y},${bOpen.width},${bOpen.height} scene=${geo.sceneClass}`);
       push('面板展开后掩码已重算（实体范围跟上新尺寸）',
         maskOpenState.maskReady === true && (maskOpenState.stats.maskCoverage || 0) > 0.03,
         `实体占比=${maskOpenState.stats.maskCoverage} bbox=${JSON.stringify(maskOpenState.stats.maskBbox)}`);
