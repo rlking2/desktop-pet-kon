@@ -1,4 +1,4 @@
-// 鲸鱼娘桌宠 · 主进程
+// 桌宠 · 主进程（通用机制，不含具体主题形象）
 // 阶段0 目标：透明 / 无边框 / 永远置顶 / 能拖 / 右键菜单 / AUTOTEST 自检
 const { app, BrowserWindow, Menu, ipcMain, screen } = require('electron');
 const path = require('node:path');
@@ -29,7 +29,7 @@ function initInputLog() {
     fs.mkdirSync(ARTIFACTS, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     inputLogPath = path.join(ARTIFACTS, `input-${stamp}.log`);
-    fs.writeFileSync(inputLogPath, `# 鲸鱼娘桌宠 原始输入日志\n# 开始时间 ${new Date().toISOString()}\n# Electron ${process.versions.electron}\n`);
+    fs.writeFileSync(inputLogPath, `# 桌宠 原始输入日志\n# 开始时间 ${new Date().toISOString()}\n# Electron ${process.versions.electron}\n`);
     return inputLogPath;
   } catch (err) {
     console.error('[输入日志] 初始化失败:', err && err.message);
@@ -75,7 +75,7 @@ function createWindow() {
     skipTaskbar: true,
     hasShadow: false,
     show: false,
-    title: '鲸鱼娘桌宠',
+    title: '桌宠',
     webPreferences: {
       preload: path.join(ROOT, 'preload.js'),
       contextIsolation: true,
@@ -250,14 +250,14 @@ function applyChineseMenus() {
     {
       label: '帮助',
       submenu: [
-        { label: '关于鲸鱼娘桌宠', click: () => {
+        { label: '关于桌宠', click: () => {
             if (!win || win.isDestroyed()) return;
             const { dialog } = require('electron');
             dialog.showMessageBox(win, {
               type: 'info',
               title: '关于',
-              message: '鲸鱼娘桌宠',
-              detail: `阶段 1：透明置顶 + 逐像素鼠标穿透 + 自动自检\n\nElectron ${process.versions.electron}\nChrome ${process.versions.chrome}\nNode ${process.versions.node}\n\n状态：自检 42 条断言 + 10 条像素分析\n日志目录：artifacts/\n\n人家是 DeepSeek 的官方拟人化形象，才不是随便一只鲸鱼呢。`,
+              message: '桌宠',
+              detail: `透明置顶 + 逐像素鼠标穿透 + 自动自检\n\nElectron ${process.versions.electron}\nChrome ${process.versions.chrome}\nNode ${process.versions.node}\n\n形象完全由 assets/ 里的素材决定，代码不写死任何主题。\n日志目录：artifacts/`,
               buttons: ['知道啦'],
             });
           } },
@@ -273,7 +273,7 @@ const menuLog = { opened: 0, errors: [], lastAt: null };
 // 模板单独抽出来：可以脱离 popup 单独验证，避免自检被模态菜单卡死
 function buildMenuTemplate() {
   return [
-    { label: '🐋 鲸鱼娘桌宠 · 阶段1', enabled: false },
+    { label: '桌宠 · 阶段1', enabled: false },
     { type: 'separator' },
     { label: '永远置顶', type: 'checkbox', checked: win.isAlwaysOnTop(), click: (mi) => win.setAlwaysOnTop(mi.checked, 'floating') },
     { label: '让她说句话', click: () => win.webContents.send('pet:say', '主人……人家在的啦，哼。') },
@@ -401,13 +401,12 @@ async function runSelfCheck() {
         innerSize: { w: window.innerWidth, h: window.innerHeight },
         petVisible: !!(q('#pet') && q('#pet').offsetWidth > 0),
         petRect: rect('#pet'),
-        tailRect: rect('#tail'),
+        spriteRect: rect('#sprite'),
+        canvasSize: (() => { const c = q('#sprite'); return c ? (c.width + 'x' + c.height) : null; })(),
         bubbleText: (q('#bubble') || {}).textContent || '',
-        animRunning: getComputedStyle(q('.whale')).animationName,
-        // 帧动画（素材）状态：渲染层的 __petTest.state() 才有，这里读同一个来源
-        sprite: (window.__petTest && window.__petTest.state) ? window.__petTest.state().sprite : null,
-        // 穿透相关：这些元素都属于"实体"，鼠标落在上面时不应穿透
         dragRegion: getComputedStyle(q('#pet')).webkitAppRegion || 'none',
+        // 帧动画 / 空位状态
+        sprite: (window.__petTest && window.__petTest.state) ? window.__petTest.state().sprite : null,
       };
     })()`);
 
@@ -452,24 +451,20 @@ async function runSelfCheck() {
       `视口 ${metrics.innerSize.w}x${metrics.innerSize.h} / 设计 ${WIN_W}x${WIN_H}（偏差 ${dw}x${dh}，DPR ${state.devicePixelRatio}）`);
     push('完整落在工作区内', state.insideWorkArea === true, `bounds=${JSON.stringify(b)} workArea=${JSON.stringify(display.workArea)}`);
     push('透明背景（body 非纯色）', /rgba\(0, 0, 0, 0\)|transparent/.test(metrics.bodyBg), `bodyBg=${metrics.bodyBg}`);
-    push('占位形象已渲染', metrics.petVisible === true && !!metrics.petRect, `petRect=${JSON.stringify(metrics.petRect)}`);
-    push('尾鳍元素存在', !!metrics.tailRect, `tailRect=${JSON.stringify(metrics.tailRect)}`);
-    if (metrics.sprite && metrics.sprite.available) {
-      push('待机动画在跑（帧动画模式）', metrics.sprite.drewFrames > 0 && metrics.sprite.modeClass === true,
-        `已绘制 ${metrics.sprite.drewFrames} 帧；CSS 呼吸动画已停用（避免与帧动画叠加）`);
-    } else {
-      push('待机动画在跑（内置 SVG 模式）', !!metrics.animRunning && metrics.animRunning !== 'none',
-        `animationName=${metrics.animRunning}`);
-    }
-    // 帧动画（素材）状态：有素材时应该是 sprite-mode，没有则退回 SVG
+    push('角色容器已渲染', metrics.petVisible === true && !!metrics.petRect, `petRect=${JSON.stringify(metrics.petRect)}`);
+    push('角色画布存在且尺寸正确', metrics.canvasSize === '130x130' && !!metrics.spriteRect,
+      `canvas=${metrics.canvasSize} spriteRect=${JSON.stringify(metrics.spriteRect)}`);
+    // 角色渲染状态：有素材在播帧动画，没素材画"空位提示"。两条路都必须真的画出东西
+    // （否则整个窗口都是空气 → 鼠标事件进不来 → 点击/拖动/穿透全部失效）
     {
       const sp = metrics.sprite || {};
       if (sp.available) {
-        push('帧动画已启用并切换显示', sp.modeClass === true && sp.groups.length > 0,
-          `动作=[${(sp.groups || []).join(', ')}] 主动作=${sp.activeGroup} 已绘制 ${sp.drewFrames} 帧`);
+        push('帧动画已启用', sp.placeholder === false && (sp.groups || []).length > 0 && sp.drewFrames > 0,
+          `动作=[${(sp.groups || []).join(', ')}] 待机=${sp.baseGroup} 已绘制 ${sp.drewFrames} 帧`);
       } else {
-        push('无素材时退回内置 SVG 形象', sp.modeClass !== true && sp.reason != null,
-          `素材状态：${sp.reason}`);
+        push('无素材时显示空位提示（保证可点可拖、穿透掩码有实体）',
+          sp.placeholder === true && sp.drewFrames > 0,
+          `已绘制 ${sp.drewFrames} 帧；未启用素材原因：${sp.reason}`);
       }
     }
     // 拖动改成手动实现（CSS -webkit-app-region 与逐像素穿透冲突），断言没有残留的 CSS drag 区域
@@ -505,7 +500,9 @@ async function runSelfCheck() {
     const cs = clickThrough.getState();
     const maskStats = cs.stats;
     push('穿透掩码已生成', cs.maskReady === true, `maskCoverage=${maskStats.maskCoverage} 物理=${maskStats.maskPhysical}`);
-    push('掩码只覆盖实体（不是整块窗口）', maskStats.maskCoverage > 0.05 && maskStats.maskCoverage < 0.75,
+    // 阈值放宽到 0.03：无素材时画的是"空位提示"（一个淡色环），实体面积本来就小；
+    // 真正要防的是"整窗都被判为实体"（那样穿透就失效了）。
+    push('掩码只覆盖实体（不是整块窗口）', maskStats.maskCoverage > 0.03 && maskStats.maskCoverage < 0.75,
       `实体占比=${maskStats.maskCoverage}（接近 1.0 说明整窗被判为实体，穿透会失效）`);
     // 掩码不该贴到窗口边缘——贴边说明有"整圈辅助视觉"（比如调试红框）被烧进了掩码
     const mb = maskStats.maskBbox;
@@ -518,15 +515,23 @@ async function runSelfCheck() {
       !!mr && mr.styleLeft === false && mr.freezeClassLeft === false && mr.bubbleVisibility === 'visible',
       `样式标签残留=${mr && mr.styleLeft} 冻结类残留=${mr && mr.freezeClassLeft} 气泡 visibility=${mr && mr.bubbleVisibility}`);
 
-    // 取窗口内几个点的屏幕坐标：中心(实体)、左上角(空气)、右下角(空气)、窗口外
+    // 取窗口内几个点的屏幕坐标。
+    // 注意：不能假定"窗口正中心一定是实体"——空位提示是个环，中心本来就是空气。
+    // 所以让掩码模块精确吐出一个实体像素的屏幕坐标，再用它验证命中判定。
     const rect = win.getBounds();
-    const tCenter = clickThrough.testPoint(rect.x + Math.round(rect.width / 2), rect.y + Math.round(rect.height / 2));
+    const solid = clickThrough.findSolidPoint();
+    const tCenter = solid
+      ? clickThrough.testPoint(solid.screenX, solid.screenY)
+      : clickThrough.testPoint(rect.x + Math.round(rect.width / 2), rect.y + Math.round(rect.height / 2));
     const tTL = clickThrough.testPoint(rect.x + 2, rect.y + 2);
     const tBR = clickThrough.testPoint(rect.x + rect.width - 3, rect.y + rect.height - 3);
     const tOutside = clickThrough.testPoint(rect.x - 50, rect.y - 50);
 
-    push('中心命中实体（可点可拖）', tCenter.inside === true && tCenter.hit === true,
-      `offset=(${tCenter.offsetX},${tCenter.offsetY}) hit=${tCenter.hit}`);
+    push('掩码里存在实体像素', !!solid,
+      solid ? `实体像素位于掩码(${solid.maskX},${solid.maskY}) → 窗口内逻辑坐标(${solid.logicalX},${solid.logicalY})`
+            : '掩码里一个实体像素都没有 → 鼠标事件会全部穿透，点不到桌宠');
+    push('实体区域命中（可点可拖）', tCenter.inside === true && tCenter.hit === true,
+      solid ? `取样自掩码实体点(${solid.logicalX},${solid.logicalY}) hit=${tCenter.hit}` : `无实体点，回退中心取样 hit=${tCenter.hit}`);
     push('左上角留白判定为空气（点击穿透）', tTL.hit === false, `hit=${tTL.hit} wouldIgnore=${tTL.wouldIgnore}`);
     push('右下角留白判定为空气（点击穿透）', tBR.hit === false, `hit=${tBR.hit} wouldIgnore=${tBR.wouldIgnore}`);
     push('窗口外一律穿透', tOutside.inside === false && tOutside.wouldIgnore === true,
@@ -541,7 +546,7 @@ async function runSelfCheck() {
     report.total = report.checks.length;
     report.ok = report.passed === report.total;
 
-    console.log('\n===== 鲸鱼娘自检报告 =====');
+    console.log('\n===== 桌宠自检报告 =====');
     console.log(`Electron ${report.electron} / Chrome ${report.chrome} / Node ${report.node}`);
     console.log(`窗口: ${b.width}x${b.height} @(${b.x},${b.y}) 置顶=${state.alwaysOnTop} 在工作区内=${state.insideWorkArea}`);
     console.log(`截图: ${report.screenshot.path} (${size.width}x${size.height}, ${png.length} bytes, 不透明占比 ${opaqueRatio})`);

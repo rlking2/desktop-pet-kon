@@ -1,8 +1,8 @@
 {
-  "name": "dsh-whale-pet",
+  "name": "dsh-desktop-pet",
   "version": "0.1.0",
   "private": true,
-  "description": "DSH 官方拟人化鲸鱼娘桌宠 —— 透明无边框置顶 + 逐像素鼠标穿透 + 自动自检",
+  "description": "桌宠 —— 透明无边框置顶 + 逐像素鼠标穿透 + 帧动画素材管线 + 自动自检",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

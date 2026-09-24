@@ -144,32 +144,40 @@ const topColors = Object.entries(bins).sort((a, b) => b[1] - a[1]).slice(0, 6)
 const checks = [];
 const push = (name, pass, detail) => checks.push({ name, pass, detail });
 
-// 形状/配色类断言是给"内置 SVG 占位形象"写的。换成主人自己的素材后，这些色卡和比例自然不成立，
-// 所以素材模式下自动跳过（否则会用一堆 FAIL 噪音掩盖真正的信息）。
+// 形状/配色类断言是给"具体主题形象"写的。两种情况下跳过：
+//   1) 已接入素材（主人自己的形象，色卡与比例自然不适用）
+//   2) 无素材（显示的是中性的"空位提示"环，同样没有主题配色可言）
 let spriteMode = false;
+let placeholderMode = false;
 try {
   const sc = JSON.parse(fs.readFileSync(path.join(path.dirname(file), 'selfcheck.json'), 'utf8'));
   spriteMode = !!sc.spriteMode;
-} catch { /* 没有自检数据就按内置形象检查 */ }
+  placeholderMode = !!(sc.page && sc.page.sprite && sc.page.sprite.placeholder);
+} catch { /* 没有自检数据就按主题形象检查 */ }
 
 push('内容不贴边（留透明边距）', minX > 2 && minY > 2 && maxX < W - 3 && maxY < H - 3,
   `bbox=(${minX},${minY})-(${maxX},${maxY}) 画布=${W}x${H}`);
 push('截图未被自检辅助线污染', hits.debugRed === 0, `debugRed=${hits.debugRed}（>0 说明红色边框层还开着）`);
 push('顶部没有菜单栏（无边框窗口不该有）', menuRowFull === 0,
   `顶部 ${MENU_ROWS} 行中被填满的行数=${menuRowFull}；左上角像素=rgba(${topPixel.r},${topPixel.g},${topPixel.b},${topPixel.a})`);
-push('主体占比 15%~60%', coverage >= 0.15 && coverage <= 0.60, `coverage=${coverage}`);
+// 主体占比断言：具体主题形象应在 15%~60%；空位提示环本身更小（约 8%~20%），另有下限
+const covMin = placeholderMode ? 0.06 : 0.15;
+push(`主体占比 ${(covMin * 100).toFixed(0)}%~60%`, coverage >= covMin && coverage <= 0.60,
+  `coverage=${coverage}${placeholderMode ? '（空位提示模式，下限放宽）' : ''}`);
 push('轮廓有起伏（不是方块）', new Set(rowProfile.map((r) => r.ratio)).size >= 4,
   `行宽分布去重=${new Set(rowProfile.map((r) => r.ratio)).size}`);
 
 if (spriteMode) {
-  console.log('（检测到帧动画模式：跳过"内置 SVG 形象"的配色与形状断言）');
+  console.log('（检测到帧动画模式：跳过"具体主题形象"的配色与形状断言）');
+} else if (placeholderMode) {
+  console.log('（检测到空位提示模式：当前没有接入素材，跳过配色与形状断言）');
 } else {
   push('长发蓝在上半部分', hits.hairBlue > opaque * 0.02, `hairBlue=${hits.hairBlue} (${(hits.hairBlue / opaque * 100).toFixed(1)}%)`);
   push('身体浅蓝存在', hits.bodyBlue > opaque * 0.02, `bodyBlue=${hits.bodyBlue}`);
   push('脸部浅色存在', hits.skin > opaque * 0.02, `skin=${hits.skin}`);
   push('眼睛深蓝存在', hits.eyeNavy > 40, `eyeNavy=${hits.eyeNavy}`);
   push('腮红粉存在', hits.blushPink > 8, `blushPink=${hits.blushPink}`);
-  push('尾鳍把上半身重心拉向右', upperCXRatio !== null && upperCXRatio > 0.50, `上半部分水平重心=${upperCXRatio}`);
+  push('主体重心偏右（尾部特征在右侧）', upperCXRatio !== null && upperCXRatio > 0.50, `上半部分水平重心=${upperCXRatio}`);
 }
 
 const report = {
@@ -193,7 +201,7 @@ fs.writeFileSync(outJson, JSON.stringify(report, null, 2));
 
 console.log(`\n===== 截图结构分析 ${report.file} (${report.size}) =====`);
 console.log(`不透明像素 ${opaque} / 覆盖率 ${(coverage * 100).toFixed(1)}%  bbox ${bboxW}x${bboxH} @(${minX},${minY})`);
-console.log(`上半部分水平重心 x=${upperCXRatio}（>0.5 说明尾鳍把重心拉向右侧）`);
+console.log(`上半部分水平重心 x=${upperCXRatio}（>0.5 说明主体重心偏右）`);
 console.log('主色: ' + report.topColors.map((c) => `${c.rgb} ${(c.share * 100).toFixed(0)}%`).join(' | '));
 console.log('--- 断言 ---');
 for (const c of checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}  (${c.detail})`);

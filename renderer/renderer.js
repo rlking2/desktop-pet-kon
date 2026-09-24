@@ -1,12 +1,19 @@
-// 鲸鱼娘桌宠 · 渲染层互动逻辑（无 Node 权限，只经 preload 暴露的 API）
+// 桌宠 · 渲染层（通用机制，不含任何具体主题形象）
+//
+// 职责：
+//   1. 把角色画到 canvas 上：有素材（assets/manifest.json）就播帧动画，没有就画一个"空位提示"
+//   2. 互动：点击说话、右键菜单、按住拖动（手动实现，因为与逐像素穿透冲突）
+//   3. 鼠标穿透上报：告诉主进程"鼠标现在落在实体上还是空气里"
+//   4. 诊断：把真实鼠标事件写进原始输入日志（排查"真人操作无效"用）
+//
+// 形象完全由素材决定，代码里不写死任何主题（配色/台词/名牌都由素材与配置决定）。
 (() => {
   const pet = document.getElementById('pet');
   const bubble = document.getElementById('bubble');
   const dbg = document.getElementById('dbg');
+  const nameEl = document.getElementById('name');
 
-  // ---------- 原始输入日志（诊断"真人点击无效"） ----------
-  // 合成事件自检全绿但真人操作无效 → 必须记录真实事件，不能再靠推理。
-  // 批量发送，避免每个事件一次 IPC。
+  // ---------- 原始输入日志 ----------
   const diagQueue = [];
   let diagFlush = null;
   function dlog(type, detail) {
@@ -23,17 +30,14 @@
   const describeTarget = (t) => (t && t.tagName ? t.tagName : '?') + (t && t.id ? '#' + t.id : '');
   window.addEventListener('beforeunload', flushDiag);
 
-  // 记录所有鼠标相关事件（capture 阶段，保证"事件是否送达渲染层"这个问题有确凿答案）
-  const MOUSE_EVENTS = ['mousemove', 'mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'mouseleave', 'mouseenter'];
+  const MOUSE_EVENTS = ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu', 'mouseleave', 'mouseenter'];
   for (const type of MOUSE_EVENTS) {
     window.addEventListener(type, (e) => {
-      if (type === 'mousemove') return; // 太密集，单独降采样记录
       dlog(type, `target=${describeTarget(e.target)} button=${e.button} detail=${e.detail} ` +
         `client=(${Math.round(e.clientX)},${Math.round(e.clientY)}) screen=(${Math.round(e.screenX)},${Math.round(e.screenY)}) ` +
         `defaultPrevented=${e.defaultPrevented}`);
     }, true);
   }
-  // mousemove 降采样：300ms 记一条，够看出"鼠标有没有动、位置在哪"
   let lastMoveLog = 0;
   window.addEventListener('mousemove', (e) => {
     const now = performance.now();
@@ -42,37 +46,18 @@
     dlog('mousemove', `client=(${Math.round(e.clientX)},${Math.round(e.clientY)}) target=${describeTarget(e.target)}`);
   }, true);
 
-  dlog('startup', `渲染层已就绪，含 4px 移动阈值版本；视口=${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio}`);
+  // ---------- 台词（中性，与主题无关；以后可由素材包或配置覆盖） ----------
+  const LINES = {
+    click: ['戳人家干嘛啦。', '在的在的。', '人家醒着呢。', '今日状态：还行。'],
+    pat: ['唔……别摸啦。', '就、就一下哦。', '（眯眼）'],
+    angry: ['哼！不理你了。', '再说人家就罢工了！', '（鼓起来）'],
+    rice: ['谢谢！', '收到，能量+1。', '这个人家记下了。'],
+  };
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-  const CLICK_LINES = [
-    '主人戳人家干嘛啦！',
-    '哼，人家才不是闲着没事做呢。',
-    '今日白饭余额：不多了……主人该喂了。',
-    '这个 DDL 人家看了一眼，先不看第二眼。',
-    '（甩尾鳍）人家在的哦。',
-    '摸鱼第 3 分钟，主人别举报人家。',
-  ];
-  const PAT_LINES = [
-    '呜……别、别摸头啦，头发会乱掉的。',
-    '人、人家才没有很舒服呢！',
-    '（耳朵尾巴都软了）就、就一下下哦。',
-  ];
-  const ANGRY_LINES = [
-    '人！家！不！胖！是深海蓝的视觉误差！',
-    '主人再说那个字，人家就罢工了！',
-    '（鼓腮）尾鳍大是鲸鱼的特征，懂不懂啊！',
-  ];
-  const RICE_LINES = [
-    '白饭！是白饭！主人最好了！',
-    '（扒饭）token 香香的……再来一碗。',
-    '这碗白饭人家记在小本本上了，会还的。',
-  ];
-
+  // ---------- 气泡 ----------
   let bubbleTimer = null;
   let sayCount = 0;
-
-  // 轻音提示：气泡是视觉反馈，万一看漏了，声音不会漏。
-  // 用 WebAudio 现场合成，不需要素材文件；非常轻，且只响 90ms。
   let audioCtx = null;
   function chirp(freq = 880) {
     try {
@@ -94,7 +79,6 @@
       return true;
     } catch { return false; }
   }
-
   function say(text, ms = 2600) {
     sayCount++;
     bubble.textContent = text;
@@ -104,47 +88,22 @@
     bubbleTimer = setTimeout(() => bubble.classList.remove('show'), ms);
   }
 
+  // ---------- 互动形变（缺素材时的兜底表现） ----------
   let animTimer = null;
   function playAnim(name, ms) {
     pet.classList.remove('hop', 'pat', 'angry');
-    // 强制重排，保证同类动画能重复触发
-    void pet.offsetWidth;
+    void pet.offsetWidth; // 强制重排，保证同类动画能重复触发
     pet.classList.add(name);
     clearTimeout(animTimer);
     animTimer = setTimeout(() => pet.classList.remove(name), ms);
   }
 
-  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  let rice = 0;
-
-  // ---------- 鼠标穿透：实时上报鼠标是否落在"实体"上 ----------
-  // 用 elementFromPoint 判断，比数学掩码更贴合实际 DOM（SVG 透明区域不会误判为实体）
-  let lastHit = null;
-  let lastMoveAt = 0;
-  function reportHit(x, y) {
-    const now = performance.now();
-    if (now - lastMoveAt < 16) return; // 限到 ~60fps，省 IPC
-    lastMoveAt = now;
-    const el = document.elementFromPoint(x, y);
-    const hit = !!(el && pet.contains(el));
-    if (hit === lastHit) return;
-    lastHit = hit;
-    window.pet.pointerHit(hit);
-  }
-
-  window.addEventListener('mousemove', (e) => reportHit(e.clientX, e.clientY));
-  window.addEventListener('mouseleave', () => {
-    if (lastHit !== false) { lastHit = false; window.pet.pointerHit(false); }
-  });
-
-  // ---------- 气泡自动翻面 ----------
-  // 气泡是窗口内的绝对定位元素，出不了窗口。窗口若贴近屏幕顶部，气泡就会被画到屏幕外。
-  // 所以窗口上半部分"悬空空间"不足时，改成从角色下方弹气泡。
+  // ---------- 气泡自动翻面（窗口贴屏幕顶部时改从下方弹出） ----------
   const sceneEl = document.querySelector('.scene');
   let flipShown = null;
   function updateFlip() {
-    const topSpace = window.screenY;            // 窗口上方还有多少屏幕空间
-    const shouldFlip = topSpace < 70;           // 不够放气泡就翻到下面
+    const topSpace = window.screenY;
+    const shouldFlip = topSpace < 70;
     if (shouldFlip === flipShown) return;
     flipShown = shouldFlip;
     sceneEl.classList.toggle('flip', shouldFlip);
@@ -154,15 +113,31 @@
   window.addEventListener('mousemove', updateFlip);
   setInterval(updateFlip, 500);
 
+  // ---------- 鼠标穿透上报 ----------
+  let lastHit = null;
+  let lastMoveAt = 0;
+  function reportHit(x, y) {
+    const now = performance.now();
+    if (now - lastMoveAt < 16) return;
+    lastMoveAt = now;
+    const el = document.elementFromPoint(x, y);
+    const hit = !!(el && pet.contains(el));
+    if (hit === lastHit) return;
+    lastHit = hit;
+    window.pet.pointerHit(hit);
+  }
+  window.addEventListener('mousemove', (e) => reportHit(e.clientX, e.clientY));
+  window.addEventListener('mouseleave', () => {
+    if (lastHit !== false) { lastHit = false; window.pet.pointerHit(false); }
+  });
+
   // ---------- 手动拖动 ----------
-  // 三个必须遵守的约束（都是踩坑换来的，见 devlog round-03）：
-  // 1) 不能在 mousedown 里 await getBounds() 再启动拖动 —— 真人快速点击时 mouseup 先到，
-  //    拖动循环会被漏关，窗口永久粘在鼠标上。
-  // 2) 不能在 mousedown 里 preventDefault() —— Chromium 会因此抑制 contextmenu 事件。
-  // 3) 必须等鼠标真的移动超过阈值（DRAG_THRESHOLD）才开始拖动 —— 否则点一下的细微抖动
-  //    也会让窗口跟着微动，按下/抬起落在不同坐标，click 事件同样不会产生。
-  const DRAG_THRESHOLD = 4; // 逻辑像素
-  let pendingDrag = null;   // { x, y } 按下起点（屏幕坐标）
+  // 三条铁律（踩坑换来的，见 devlog）：
+  //  1) 不能在 mousedown 里 await getBounds() 再启动拖动 —— 快速点击时 mouseup 先到，拖动循环会漏关
+  //  2) 不能在 mousedown 里 preventDefault() —— Chromium 会因此抑制 contextmenu
+  //  3) 必须有移动阈值 —— 否则点一下的微抖动让窗口跟着动，click 事件不会产生
+  const DRAG_THRESHOLD = 4;
+  let pendingDrag = null;
   let dragging = false;
 
   pet.addEventListener('mousedown', (e) => {
@@ -175,90 +150,40 @@
     if (!pendingDrag || dragging) return;
     const dx = Math.round(e.screenX) - pendingDrag.x;
     const dy = Math.round(e.screenY) - pendingDrag.y;
-    if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // 还只是手抖，不算拖动
+    if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
     dragging = true;
     pet.classList.add('dragging');
     dlog('drag-start', `位移=(${dx},${dy}) 超过阈值，开始拖动`);
-    window.pet.dragStart({
-      cursorX: Math.round(e.screenX),
-      cursorY: Math.round(e.screenY),
-    });
+    window.pet.dragStart({ cursorX: Math.round(e.screenX), cursorY: Math.round(e.screenY) });
   });
 
   const stopDrag = () => {
-    const wasDragging = dragging;
     pendingDrag = null;
     if (!dragging) return;
     dragging = false;
     pet.classList.remove('dragging');
-    dlog('drag-end', `拖动结束（本次确实拖动过=${wasDragging}）`);
+    dlog('drag-end', '拖动结束');
     window.pet.dragEnd();
   };
   window.addEventListener('mouseup', stopDrag);
   window.addEventListener('blur', stopDrag);
   window.addEventListener('mouseleave', stopDrag);
 
-  pet.addEventListener('click', (e) => {
-    dlog('click-handler', `气泡台词即将播放，target=${describeTarget(e.target)}`);
-    say(pick(CLICK_LINES));
-    // 有 happy/hop 素材就播帧动画，否则退回 CSS 形变（两者都不缺）
+  pet.addEventListener('click', () => {
+    say(pick(LINES.click));
     if (!playAction('happy', ['hop'])) playAnim('hop', 520);
   });
 
-  // 摸头 / 喂饭 / 生气：由右键菜单或主人台词触发
-  window.pet.onAction((name) => {
-    if (name === 'headpat') {
-      say(pick(PAT_LINES));
-      if (!playAction('pet', ['headpat', 'pat'])) playAnim('pat', 720);
-      return;
-    }
-    if (name === 'rice') {
-      rice += 1;
-      say(`${pick(RICE_LINES)}\n（今日已吃 ${rice} 碗白饭）`, 3200);
-      if (!playAction('happy', ['hop', 'eat'])) playAnim('hop', 520);
-      return;
-    }
-    if (name === 'angry') {
-      say(pick(ANGRY_LINES));
-      if (!playAction('angry')) playAnim('angry', 1300);
-      return;
-    }
-  });
-
-  window.pet.onSay((text) => say(text, 3000));
-  window.pet.onDebugOverlay((on) => dbg.classList.toggle('on', !!on));
-  // 自检专用通道：直接下达穿透开关，用来验证 OS 层窗口状态
-  window.pet.onForceHit((hit) => { lastHit = hit; window.pet.pointerHit(hit); });
-
+  // ---------- 右键 / 按键 ----------
   window.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     window.__petContextMenuCount = (window.__petContextMenuCount || 0) + 1;
-    window.__petContextMenuFrom = (e.target && e.target.tagName ? e.target.tagName : '?') +
-      (e.target && e.target.id ? '#' + e.target.id : '');
+    window.__petContextMenuFrom = describeTarget(e.target);
     window.pet.openContextMenu();
   });
 
-  // 自检用：把 renderer 里真实发生的点击链记录下来（自动 click() 不触发 mousedown，所以必须记真事件）
-  let clickCount = 0;
-  pet.addEventListener('click', () => { clickCount++; });
-
-  // ---- 右键诊断：把"物理右键事件到底有没有进来"暴露给主进程 ----
-  // 真人反馈过右键无效。合成事件能通过、物理右键不一定，必须留下可读的现场记录。
-  const rightDiag = { mousedown: 0, mouseup: 0, contextmenu: 0, lastAt: null, lastTarget: null };
-  window.addEventListener('mousedown', (e) => {
-    if (e.button === 2) { rightDiag.mousedown++; rightDiag.lastAt = Date.now(); rightDiag.lastTarget = e.target?.tagName; }
-  }, true);
-  window.addEventListener('mouseup', (e) => {
-    if (e.button === 2) rightDiag.mouseup++;
-  }, true);
-  window.addEventListener('contextmenu', (e) => {
-    rightDiag.contextmenu++;
-  }, true);
-  window.__petRightDiag = rightDiag;
-
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.pet.quit();
-    // 兜底入口：万一物理右键因为平台原因进不来，用 Ctrl+M 照样能开菜单
     if (e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
       e.preventDefault();
       window.__petContextMenuCount = (window.__petContextMenuCount || 0) + 1;
@@ -267,213 +192,140 @@
     }
   });
 
-  // 自检用：把交互能力暴露成一个可调用入口，让人家能自动验证
-  window.__petTest = {
-    click: () => pet.click(),
-    action: (n) => {
-      if (n === 'headpat') { say(pick(PAT_LINES)); playAnim('pat', 720); }
-      if (n === 'angry') { say(pick(ANGRY_LINES)); playAnim('angry', 1300); }
-    },
-    // 模拟鼠标移动，验证穿透上报逻辑
-    probeHit: (x, y) => {
-      const el = document.elementFromPoint(x, y);
-      const hit = !!(el && pet.contains(el));
-      lastHit = hit;
-      window.pet.pointerHit(hit);
-      return { hit, element: el ? (el.tagName + (el.id ? '#' + el.id : '')) : null };
-    },
-    // 模拟拖动开始/结束，验证手动拖动链路。dryRun=true 时主进程只走链路、绝不搬动窗口，
-    // 避免自检把主人的桌宠挪到屏幕中间去。
-    dragSimulate: async () => {
-      const bounds = await window.pet.getBounds();
-      window.pet.dragStart({
-        cursorX: bounds.x + Math.round(bounds.width / 2),
-        cursorY: bounds.y + Math.round(bounds.height / 2),
-        winX: bounds.x,
-        winY: bounds.y,
-        winW: 200,
-        winH: 250,
-        dryRun: true,
-      });
-      await new Promise((r) => setTimeout(r, 120));
-      window.pet.dragEnd();
-      return { bounds, ok: true };
-    },    // 真实事件链测试：模拟真人的 mousedown → mouseup → click（自动 click() 不走 mousedown，
-    // 所以旧版测试根本覆盖不到拖动 race）
-    realClick: () => {
-      const r = pet.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      const sx = Math.round(window.screenX + x);
-      const sy = Math.round(window.screenY + y);
-      const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, screenX: sx, screenY: sy, button: 0, detail: 1 };
-      pet.dispatchEvent(new MouseEvent('mousedown', opts));
-      window.dispatchEvent(new MouseEvent('mouseup', opts));
-      pet.dispatchEvent(new MouseEvent('click', opts));
-      return { clickCount, dragging };
-    },
-    // 真实拖动链：mousedown → 移动超过阈值 → 拖动启动 → mouseup 结束
-    realDrag: async (movePx) => {
-      const r = pet.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      const base = { bubbles: true, cancelable: true, button: 0, detail: 1 };
-      const sx = Math.round(window.screenX + x);
-      const sy = Math.round(window.screenY + y);
-      pet.dispatchEvent(new MouseEvent('mousedown', { ...base, clientX: x, clientY: y, screenX: sx, screenY: sy }));
-      const m = movePx || 30;
-      window.dispatchEvent(new MouseEvent('mousemove',
-        { ...base, clientX: x + m, clientY: y + m, screenX: sx + m, screenY: sy + m }));
-      await new Promise((res) => setTimeout(res, 120));
-      const draggingDuring = dragging;
-      window.dispatchEvent(new MouseEvent('mouseup',
-        { ...base, clientX: x + m, clientY: y + m, screenX: sx + m, screenY: sy + m }));
-      return { draggingDuring, draggingAfter: dragging };
-    },
-    // 复现主人的真实场景：点一下时鼠标有轻微移动（真人不可能绝对静止）。
-    // 窗口跟着鼠标微动 → 按下和抬起落在不同坐标 → Chromium 不产生 click。
-    realClickWithJitter: (jitterPx) => {
-      const before = { say: sayCount, click: clickCount };
-      const r = pet.getBoundingClientRect();
-      const x = r.left + r.width / 2;
-      const y = r.top + r.height / 2;
-      const base = { bubbles: true, cancelable: true, button: 0, detail: 1 };
-      pet.dispatchEvent(new MouseEvent('mousedown',
-        { ...base, clientX: x, clientY: y, screenX: window.screenX + x, screenY: window.screenY + y }));
-      const j = jitterPx || 0;
-      window.dispatchEvent(new MouseEvent('mouseup',
-        { ...base, clientX: x + j, clientY: y + j, screenX: window.screenX + x + j, screenY: window.screenY + y + j }));
-      pet.dispatchEvent(new MouseEvent('click',
-        { ...base, clientX: x + j, clientY: y + j, screenX: window.screenX + x + j, screenY: window.screenY + y + j }));
-      return { sayDelta: sayCount - before.say, clickDelta: clickCount - before.click, jitter: j };
-    },
-    // 真实右键链：走 window 上的 contextmenu 处理器
-    realContextMenu: () => {
-      const before = window.__petContextMenuCount || 0;
-      const r = pet.getBoundingClientRect();
-      const opts = { bubbles: true, cancelable: true, button: 2, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
-      const ev = new MouseEvent('contextmenu', opts);
-      const notCancelled = pet.dispatchEvent(ev);
-      return {
-        fired: (window.__petContextMenuCount || 0) > before,
-        count: window.__petContextMenuCount || 0,
-        from: window.__petContextMenuFrom || null,
-        defaultPrevented: ev.defaultPrevented,
-        notCancelled,
-      };
-    },
-    // 兜底入口测试：模拟 Ctrl+M
-    keyboardMenu: () => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true, cancelable: true }));
-      return { count: window.__petContextMenuCount || 0, from: window.__petContextMenuFrom || null };
-    },
-    state: () => ({
-      petClasses: pet.className,
-      bubbleShown: bubble.classList.contains('show'),
-      bubbleText: bubble.textContent,
-      // 关键：class 加上不等于"看得见"，必须看计算后的透明度
-      bubbleOpacity: +(getComputedStyle(bubble).opacity),
-      bubbleVisibility: getComputedStyle(bubble).visibility,
-      bubbleRect: (() => {
-        const r = bubble.getBoundingClientRect();
-        return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) };
-      })(),
-      bubbleInViewport: (() => {
-        const r = bubble.getBoundingClientRect();
-        return r.top >= 0 && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight;
-      })(),
-      lastHit,
-      clickCount,
-      sayCount,
-      dragging,
-      contextMenuCount: window.__petContextMenuCount || 0,
-      rightDiag: { ...rightDiag },
-      sprite: {
-        available: spriteState.available,
-        reason: spriteState.reason,
-        groups: spriteState.groups,
-        baseGroup: spriteState.baseGroup,
-        activeGroup: spriteState.activeGroup,
-        activeFrame: spriteState.activeFrame,
-        drewFrames: spriteState.drewFrames,
-        modeClass: pet.classList.contains('sprite-mode'),
-        timeline: spriteTimeline ? { group: spriteTimeline.group, loop: spriteTimeline.loop } : null,
-      },
-    }),
-  };
+  window.pet.onSay((text) => say(text, 3000));
+  window.pet.onDebugOverlay((on) => dbg.classList.toggle('on', !!on));
+  window.pet.onForceHit((hit) => { lastHit = hit; window.pet.pointerHit(hit); });
 
-  console.log('[鲸鱼娘] 桌宠已就位，尾鳍在线。');
+  window.pet.onAction((name) => {
+    if (name === 'headpat') {
+      say(pick(LINES.pat));
+      if (!playAction('pet', ['headpat', 'pat'])) playAnim('pat', 720);
+      return;
+    }
+    if (name === 'rice') {
+      rice += 1;
+      say(`${pick(LINES.rice)}\n（已投喂 ${rice} 次）`, 3200);
+      if (!playAction('happy', ['hop', 'eat'])) playAnim('hop', 520);
+      return;
+    }
+    if (name === 'angry') {
+      say(pick(LINES.angry));
+      if (!playAction('angry')) playAnim('angry', 1300);
+      return;
+    }
+  });
+  let rice = 0;
 
-  // ---------- 帧动画播放器 ----------
-  // 素材来自 assets/（由 scripts/inspect-assets.js --write 生成 manifest.json），
-  // 通过 preload 的 getAssetManifest() 拿到（主进程读磁盘，绕开 CSP 对 fetch 的限制）。
-  // 没有素材 → 保持内置 SVG 占位形象，零配置。
-  const spriteCanvas = document.getElementById('sprite');
-  const spriteCtx = spriteCanvas ? spriteCanvas.getContext('2d') : null;
+  // ---------- 角色渲染：帧动画 / 空位提示 ----------
+  const canvas = document.getElementById('sprite');
+  const ctx = canvas ? canvas.getContext('2d') : null;
+  const CW = canvas ? canvas.width : 130;
+  const CH = canvas ? canvas.height : 130;
   const spriteGroups = {};
-  let spriteState = { available: false, reason: '未加载', groups: [], activeGroup: null, activeFrame: 0, drewFrames: 0 };
+  const spriteState = {
+    available: false, reason: '未加载', groups: [], baseGroup: null,
+    activeGroup: null, activeFrame: 0, drewFrames: 0, placeholder: false,
+  };
+  const PRIORITY = { pet: 3, angry: 2, happy: 1, idle: 0 };
+
+  // 空位提示：没有素材时画一个中性的"占位环"，保证桌宠仍然可见、可点、可拖、
+  // 穿透掩码也有实体可依（否则整个窗口都是空气，鼠标事件根本进不来）。
+  function drawPlaceholder(t) {
+    if (!ctx) return;
+    const cx = CW / 2, cy = CH / 2;
+    const pulse = 1 + Math.sin(t / 700) * 0.025;
+    const r = 42 * pulse;
+    ctx.clearRect(0, 0, CW, CH);
+
+    // 淡填充：既让"实体区域"足够大（可点可拖、穿透掩码有效），又不会抢眼。
+    // alpha 要够高才能通过穿透掩码的阈值（ALPHA_THRESHOLD=90/255≈0.35），
+    // 否则"环内"会被判为空气、鼠标穿过去点不到桌宠。
+    ctx.save();
+    const grad = ctx.createRadialGradient(cx, cy, r * 0.15, cx, cy, r);
+    grad.addColorStop(0, 'rgba(158, 176, 194, 0.55)');
+    grad.addColorStop(0.75, 'rgba(158, 176, 194, 0.42)');
+    grad.addColorStop(1, 'rgba(158, 176, 194, 0.18)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = 'rgba(150, 170, 190, 0.95)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 7]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = 'rgba(38, 52, 66, 0.92)';
+    ctx.font = 'bold 13px "Microsoft YaHei UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('等待素材', cx, cy - 8);
+    ctx.font = '10px "Microsoft YaHei UI", sans-serif';
+    ctx.fillText('放入 assets/ 即可', cx, cy + 9);
+    ctx.restore();
+
+    spriteState.placeholder = true;
+    spriteState.drewFrames++;
+  }
 
   function drawSpriteFrame(group, idx) {
     const g = spriteGroups[group];
-    if (!g || !g.images[idx] || !spriteCtx) return false;
+    if (!g || !g.images[idx] || !ctx) return false;
     const img = g.images[idx];
     if (!img.complete || !img.naturalWidth) return false;
-    const W = spriteCanvas.width, H = spriteCanvas.height;
-    // 等比缩放铺满画布并居中（保持像素比例，不拉伸变形）
-    const scale = Math.min(W / img.naturalWidth, H / img.naturalHeight);
+    const scale = Math.min(CW / img.naturalWidth, CH / img.naturalHeight);
     const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
-    spriteCtx.clearRect(0, 0, W, H);
-    spriteCtx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+    ctx.clearRect(0, 0, CW, CH);
+    ctx.drawImage(img, (CW - w) / 2, (CH - h) / 2, w, h);
+    spriteState.available = true;
+    spriteState.placeholder = false;
     spriteState.activeGroup = group;
     spriteState.activeFrame = idx;
     spriteState.drewFrames++;
     return true;
   }
 
-  // 播放器：每个动作一条独立时间线，用 rAF 按"每帧延时"推进
-  // 优先级：摸头(3) > 生气(2) > 开心/点击(1) > 待机(0)
-  // 规则：高优先级可以打断低优先级；低优先级不能打断正在播的高优先级（避免动作打架）
-  const PRIORITY = { pet: 3, angry: 2, happy: 1, idle: 0 };
   let spriteTimeline = null;
-  let spriteBaseGroup = null; // 待机动作（其他动作播完回到它）
-
   function playGroup(name, { loop = true, force = false } = {}) {
     const g = spriteGroups[name];
     if (!g || !g.images.length) return false;
     const curPrio = spriteTimeline ? (PRIORITY[spriteTimeline.group] ?? 0) : -1;
     const newPrio = PRIORITY[name] ?? 0;
     if (!force && spriteTimeline && !spriteTimeline.finished && newPrio < curPrio) {
-      dlog('sprite-play', `忽略「${name}」(优先级 ${newPrio}) —— 正在播「${spriteTimeline.group}」(优先级 ${curPrio})`);
+      dlog('sprite-play', `忽略「${name}」(优先级 ${newPrio})，正在播「${spriteTimeline.group}」(优先级 ${curPrio})`);
       return false;
     }
-    spriteTimeline = { group: name, loop, finished: false, startedAt: performance.now() };
+    spriteTimeline = { group: name, loop, finished: false };
     drawSpriteFrame(name, 0);
     dlog('sprite-play', `播放动作「${name}」loop=${loop} 优先级=${newPrio} 帧数=${g.images.length}`);
     return true;
   }
-
-  // 兼容两种命名：素材里可以叫 happy，也可以叫 hop
   function playAction(primary, aliases = []) {
-    for (const n of [primary, ...aliases]) {
-      if (spriteGroups[n]) return playGroup(n, { loop: false });
-    }
-    return false; // 没有这组素材 → 交给 CSS 形变动画表现
+    for (const n of [primary, ...aliases]) if (spriteGroups[n]) return playGroup(n, { loop: false });
+    return false;
   }
 
-  let lastSpriteAdvance = 0;
-  function spriteTick(ts) {
+  let lastAdvance = 0;
+  function tick(ts) {
     if (spriteTimeline) {
       const g = spriteGroups[spriteTimeline.group];
-      if (g && ts - lastSpriteAdvance >= (g.delays[spriteState.activeFrame] || 120)) {
-        lastSpriteAdvance = ts;
+      if (g && ts - lastAdvance >= (g.delays[spriteState.activeFrame] || 120)) {
+        lastAdvance = ts;
         const next = spriteState.activeFrame + 1;
         if (next >= g.images.length) {
           if (spriteTimeline.loop) {
             drawSpriteFrame(spriteTimeline.group, 0);
           } else {
-            // 单次动作播完 → 回待机
             spriteTimeline.finished = true;
-            const back = spriteBaseGroup || spriteTimeline.group;
+            const back = spriteState.baseGroup;
             spriteTimeline = null;
             if (spriteGroups[back]) playGroup(back, { loop: true, force: true });
           }
@@ -481,12 +333,14 @@
           drawSpriteFrame(spriteTimeline.group, next);
         }
       }
+    } else if (!spriteState.available) {
+      drawPlaceholder(ts); // 待机空位提示（呼吸式脉动）
     }
-    requestAnimationFrame(spriteTick);
+    requestAnimationFrame(tick);
   }
 
-  async function initSpriteAnimation() {
-    if (!spriteCtx) { spriteState.reason = '页面里没有 #sprite 画布'; return; }
+  async function initSprite() {
+    if (!ctx) { spriteState.reason = '页面里没有 #sprite 画布'; return; }
     let manifest = null;
     try {
       manifest = await window.pet.getAssetManifest();
@@ -497,29 +351,25 @@
     }
     if (!manifest || !manifest.found || !manifest.ok) {
       spriteState.reason = (manifest && (manifest.reason || (manifest.problems || []).join('; '))) || '没有素材';
-      dlog('sprite-init', `未启用帧动画（${spriteState.reason}），使用内置 SVG 形象`);
+      dlog('sprite-init', `无素材，显示空位提示（${spriteState.reason}）`);
       return;
     }
-    if (manifest.problems && manifest.problems.length) {
-      dlog('sprite-init', '素材清单有告警: ' + manifest.problems.join('; '));
-    }
+    if (manifest.problems && manifest.problems.length) dlog('sprite-init', '素材告警: ' + manifest.problems.join('; '));
 
-    // 预加载全部帧
     for (const [name, g] of Object.entries(manifest.groups)) {
-      const images = [];
-      const delays = [];
+      const images = [], delays = [];
       await Promise.all(g.frames.map((f, i) => new Promise((resolve) => {
         const img = new Image();
         img.onload = () => { images[i] = img; delays[i] = f.delayMs; resolve(true); };
-        img.onerror = () => { resolve(false); };
+        img.onerror = () => resolve(false);
         img.src = f.url;
       })));
       const loaded = images.filter((im) => im && im.naturalWidth).length;
       if (loaded !== g.frames.length) {
-        dlog('sprite-load', `动作「${name}」只加载成功 ${loaded}/${g.frames.length} 帧，跳过该动作`);
+        dlog('sprite-load', `动作「${name}」仅 ${loaded}/${g.frames.length} 帧可用，跳过`);
         continue;
       }
-      spriteGroups[name] = { images, delays, frameCount: g.frameCount, canvas: g.canvas };
+      spriteGroups[name] = { images, delays };
     }
 
     const names = Object.keys(spriteGroups);
@@ -528,30 +378,139 @@
       dlog('sprite-init', spriteState.reason);
       return;
     }
-
-    // 切换显示模式：优先 idle，否则用第一个可用动作
     const primary = spriteGroups.idle ? 'idle' : names[0];
-    spriteBaseGroup = primary;
-    pet.classList.add('sprite-mode');
-    spriteState.available = true;
     spriteState.groups = names;
-    spriteState.reason = '已启用';
     spriteState.baseGroup = primary;
+    spriteState.reason = '已启用';
+    spriteState.placeholder = false;
     playGroup(primary, { loop: true, force: true });
-    requestAnimationFrame(spriteTick);
-    dlog('sprite-init', `帧动画已启用：动作=[${names.join(', ')}]，待机=${primary}，画布=${spriteCanvas.width}x${spriteCanvas.height}`);
-    console.log(`[鲸鱼娘] 帧动画已启用：${names.join(' / ')}（待机 ${primary}）`);
+    dlog('sprite-init', `帧动画已启用：动作=[${names.join(', ')}]，待机=${primary}`);
+    console.log(`[桌宠] 帧动画已启用：${names.join(' / ')}（待机 ${primary}）`);
 
-    // ★ 换形象后必须重算穿透掩码：否则点击判定范围还停留在旧形象上
-    // （角色变大了，鼠标移到新的身体部位却会被当成空气穿透掉）
+    // 形象变了必须重算穿透掩码（否则点击判定范围跟角色对不上）
     setTimeout(() => {
       try {
         window.pet.refreshMask();
-        dlog('sprite-init', '已请求重算穿透掩码（形象变了，掩码必须跟着变）');
+        dlog('sprite-init', '已请求重算穿透掩码');
       } catch (err) {
         dlog('sprite-init', '请求重算掩码失败: ' + (err && err.message));
       }
     }, 350);
   }
-  initSpriteAnimation();
+
+  requestAnimationFrame(tick);
+  initSprite();
+
+  // ---------- 自检入口 ----------
+  let clickCount = 0;
+  pet.addEventListener('click', () => { clickCount++; });
+  const rightDiag = { mousedown: 0, mouseup: 0, contextmenu: 0, lastAt: null, lastTarget: null };
+  window.addEventListener('mousedown', (e) => {
+    if (e.button === 2) { rightDiag.mousedown++; rightDiag.lastAt = Date.now(); rightDiag.lastTarget = e.target?.tagName; }
+  }, true);
+  window.addEventListener('mouseup', (e) => { if (e.button === 2) rightDiag.mouseup++; }, true);
+  window.addEventListener('contextmenu', () => { rightDiag.contextmenu++; }, true);
+
+  window.__petTest = {
+    click: () => pet.click(),
+    action: (n) => {
+      if (n === 'headpat') { say(pick(LINES.pat)); playAnim('pat', 720); }
+      if (n === 'angry') { say(pick(LINES.angry)); playAnim('angry', 1300); }
+    },
+    probeHit: (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      const hit = !!(el && pet.contains(el));
+      lastHit = hit;
+      window.pet.pointerHit(hit);
+      return { hit, element: describeTarget(el) };
+    },
+    keyboardMenu: () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true, cancelable: true }));
+      return { count: window.__petContextMenuCount || 0, from: window.__petContextMenuFrom || null };
+    },
+    realClick: () => {
+      const r = pet.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const sx = Math.round(window.screenX + x), sy = Math.round(window.screenY + y);
+      const base = { bubbles: true, cancelable: true, clientX: x, clientY: y, screenX: sx, screenY: sy, button: 0, detail: 1 };
+      const before = { say: sayCount, click: clickCount };
+      pet.dispatchEvent(new MouseEvent('mousedown', base));
+      window.dispatchEvent(new MouseEvent('mouseup', base));
+      pet.dispatchEvent(new MouseEvent('click', base));
+      return { sayDelta: sayCount - before.say, clickDelta: clickCount - before.click, dragging };
+    },
+    realClickWithJitter: (jitterPx) => {
+      const r = pet.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const j = jitterPx || 0;
+      const base = { bubbles: true, cancelable: true, button: 0, detail: 1 };
+      const before = { say: sayCount, click: clickCount };
+      pet.dispatchEvent(new MouseEvent('mousedown', { ...base, clientX: x, clientY: y, screenX: window.screenX + x, screenY: window.screenY + y }));
+      window.dispatchEvent(new MouseEvent('mouseup', { ...base, clientX: x + j, clientY: y + j, screenX: window.screenX + x + j, screenY: window.screenY + y + j }));
+      pet.dispatchEvent(new MouseEvent('click', { ...base, clientX: x + j, clientY: y + j, screenX: window.screenX + x + j, screenY: window.screenY + y + j }));
+      return { sayDelta: sayCount - before.say, clickDelta: clickCount - before.click, jitter: j };
+    },
+    realDrag: async (movePx) => {
+      const r = pet.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const base = { bubbles: true, cancelable: true, button: 0, detail: 1 };
+      const sx = Math.round(window.screenX + x), sy = Math.round(window.screenY + y);
+      const m = movePx || 30;
+      pet.dispatchEvent(new MouseEvent('mousedown', { ...base, clientX: x, clientY: y, screenX: sx, screenY: sy }));
+      window.dispatchEvent(new MouseEvent('mousemove', { ...base, clientX: x + m, clientY: y + m, screenX: sx + m, screenY: sy + m }));
+      await new Promise((res) => setTimeout(res, 120));
+      const draggingDuring = dragging;
+      window.dispatchEvent(new MouseEvent('mouseup', { ...base, clientX: x + m, clientY: y + m, screenX: sx + m, screenY: sy + m }));
+      return { draggingDuring, draggingAfter: dragging };
+    },
+    realContextMenu: () => {
+      const before = window.__petContextMenuCount || 0;
+      const r = pet.getBoundingClientRect();
+      const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+      const ret = pet.dispatchEvent(ev);
+      return { fired: (window.__petContextMenuCount || 0) > before, count: window.__petContextMenuCount || 0,
+        from: window.__petContextMenuFrom || null, defaultPrevented: ev.defaultPrevented, dispatchReturn: ret };
+    },
+    dragSimulate: async () => {
+      const bounds = await window.pet.getBounds();
+      window.pet.dragStart({
+        cursorX: bounds.x + Math.round(bounds.width / 2),
+        cursorY: bounds.y + Math.round(bounds.height / 2),
+        winX: bounds.x, winY: bounds.y, winW: 200, winH: 250, dryRun: true,
+      });
+      await new Promise((r) => setTimeout(r, 120));
+      window.pet.dragEnd();
+      return { bounds, ok: true };
+    },
+    state: () => ({
+      petClasses: pet.className,
+      bubbleShown: bubble.classList.contains('show'),
+      bubbleText: bubble.textContent,
+      bubbleOpacity: +(getComputedStyle(bubble).opacity),
+      bubbleVisibility: getComputedStyle(bubble).visibility,
+      bubbleRect: (() => { const r = bubble.getBoundingClientRect();
+        return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) }; })(),
+      bubbleInViewport: (() => { const r = bubble.getBoundingClientRect();
+        return r.top >= 0 && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight; })(),
+      lastHit, clickCount, sayCount, dragging,
+      contextMenuCount: window.__petContextMenuCount || 0,
+      rightDiag: { ...rightDiag },
+      scopeClass: pet.className,
+      sprite: {
+        available: spriteState.available,
+        placeholder: spriteState.placeholder,
+        reason: spriteState.reason,
+        groups: spriteState.groups,
+        baseGroup: spriteState.baseGroup,
+        activeGroup: spriteState.activeGroup,
+        activeFrame: spriteState.activeFrame,
+        drewFrames: spriteState.drewFrames,
+        canvasSize: `${CW}x${CH}`,
+        timeline: spriteTimeline ? { group: spriteTimeline.group, loop: spriteTimeline.loop } : null,
+      },
+    }),
+  };
+
+  dlog('startup', `渲染层就绪（通用机制版）：视口=${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio} 画布=${CW}x${CH}`);
+  console.log('[桌宠] 渲染层就绪（无内置主题形象，等待素材）');
 })();

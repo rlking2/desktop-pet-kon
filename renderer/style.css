@@ -1,4 +1,4 @@
-/* 鲸鱼娘桌宠 · 样式（深海蓝主题） */
+/* 桌宠 · 通用样式（不含任何具体主题形象） */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
@@ -21,7 +21,7 @@ html, body {
   justify-content: flex-end;
 }
 
-/* ---------- 气泡 ---------- */
+/* ---------- 对话气泡 ---------- */
 .bubble {
   position: absolute;
   top: 4px;
@@ -32,21 +32,31 @@ html, body {
   padding: 7px 11px;
   border-radius: 12px;
   background: rgba(255, 255, 255, .99);
-  color: #0d3a5c;
+  color: #1f2933;
   font-size: 12px;
   line-height: 1.5;
   font-weight: 600;
   text-align: center;
   white-space: pre-wrap;
-  border: 2.5px solid #4fb6ec;
-  box-shadow: 0 4px 12px rgba(6, 40, 70, .45);
+  border: 2.5px solid #8aa4b8;
+  box-shadow: 0 4px 12px rgba(20, 35, 50, .45);
   opacity: 0;
   transition: opacity .15s ease, transform .15s cubic-bezier(.2, 1.6, .4, 1);
   pointer-events: none;
 }
 .bubble.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
-
-/* 贴顶翻面：桌宠被拖到屏幕上方时，气泡改从角色下方弹出（否则会被画到屏幕外/窗口外） */
+.bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  transform: translateX(-50%);
+  width: 0; height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-top: 9px solid #8aa4b8;
+}
+/* 贴顶翻面：窗口贴近屏幕上方时，气泡改从角色下方弹出（否则会被画到窗口外） */
 .scene.flip .bubble {
   top: auto;
   bottom: 6px;
@@ -57,21 +67,10 @@ html, body {
   bottom: auto;
   top: -9px;
   border-top: 0;
-  border-bottom: 9px solid #4fb6ec;
-}
-.bubble::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: -9px;
-  transform: translateX(-50%);
-  width: 0; height: 0;
-  border-left: 7px solid transparent;
-  border-right: 7px solid transparent;
-  border-top: 9px solid #4fb6ec;
+  border-bottom: 9px solid #8aa4b8;
 }
 
-/* ---------- 角色（窗口 200x250，角色 130x130 留出穿透留白） ---------- */
+/* ---------- 角色容器 ---------- */
 .pet {
   position: relative;
   width: 130px;
@@ -80,50 +79,20 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  filter: drop-shadow(0 4px 7px rgba(8, 45, 80, .38));
   /* 不用 -webkit-app-region: drag —— 它与逐像素穿透冲突，拖动在 renderer 里手动实现 */
   -webkit-app-region: no-drag;
   cursor: grab;
 }
 .pet.dragging { cursor: grabbing; }
 
-.whale {
-  width: 130px;
-  height: 130px;
-  overflow: visible;
-  animation: breathe 3.2s ease-in-out infinite;
-  transform-origin: 50% 82%;
-}
-
-/* 帧动画画布：默认隐藏（没有素材时显示内置 SVG）；有素材时由 JS 加上 .active */
+/* 角色本体画布：所有形象都画在这里（帧动画 / 空位提示） */
 .sprite {
-  display: none;
+  display: block;
   width: 130px;
   height: 130px;
-  image-rendering: auto;
-}
-.pet.sprite-mode .sprite { display: block; }
-.pet.sprite-mode .whale { display: none; }
-/* 帧动画自带的动作由素材体现，但"互动变形"（蹦跳/摸头/生气抖动）必须仍然作用于可见元素，
-   否则点了不会有任何反应。所以这些动画同时挂到 canvas 上。 */
-.pet.sprite-mode .whale { animation: none; }
-.pet.hop .sprite { animation: hop .5s ease; }
-.pet.pat .sprite { animation: pat .7s ease; }
-.pet.angry .sprite { animation: angry .4s ease-in-out 3; }
-
-@keyframes breathe {
-  0%, 100% { transform: translateY(0) scale(1); }
-  50%      { transform: translateY(-3.5px) scale(1.015, .988); }
 }
 
-.eye { animation: blink 4.6s infinite; transform-origin: center; transform-box: fill-box; }
-@keyframes blink {
-  0%, 91%, 100% { transform: scaleY(1); }
-  94%, 97%      { transform: scaleY(.08); }
-}
-
-.blush { opacity: .5; transition: opacity .2s ease; }
-
+/* ---------- 名牌与提示 ---------- */
 .name {
   margin-top: 5px;
   font-size: 10px;
@@ -131,24 +100,25 @@ html, body {
   color: #f2fbff;
   padding: 1px 8px;
   border-radius: 8px;
-  background: rgba(24, 78, 124, .78);
-  border: 1px solid rgba(160, 222, 255, .6);
+  background: rgba(40, 55, 70, .78);
+  border: 1px solid rgba(200, 220, 235, .55);
   white-space: nowrap;
 }
 
 .hint {
   margin-top: 4px;
   font-size: 9px;
-  color: #dff4ff;
-  text-shadow: 0 1px 3px rgba(0, 20, 40, .9);
+  color: #eaf2f8;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
   opacity: 0;
   transition: opacity .2s ease;
   white-space: nowrap;
 }
 .pet:hover .hint { opacity: .95; }
 
-/* ---------- 互动状态 ---------- */
-.pet.hop .whale { animation: hop .5s ease; }
+/* ---------- 互动形变动画 ---------- */
+/* 缺某组素材时，动作靠这些变形表现；有素材时两者叠加也不冲突 */
+.pet.hop .sprite { animation: hop .5s ease; }
 @keyframes hop {
   0%   { transform: translateY(0) scale(1); }
   35%  { transform: translateY(-16px) scale(.96, 1.06); }
@@ -156,22 +126,20 @@ html, body {
   100% { transform: translateY(0) scale(1); }
 }
 
-.pet.pat .whale { animation: pat .7s ease; }
+.pet.pat .sprite { animation: pat .7s ease; }
 @keyframes pat {
   0%, 100% { transform: scale(1); }
   50%      { transform: scale(1.06, .94) rotate(-2deg); }
 }
-.pet.pat .blush { opacity: .95; }
 
-.pet.angry .whale { animation: angry .4s ease-in-out 3; }
+.pet.angry .sprite { animation: angry .4s ease-in-out 3; }
 @keyframes angry {
   0%, 100% { transform: translateX(0) rotate(0); }
   25%      { transform: translateX(-6px) rotate(-3deg); }
   75%      { transform: translateX(6px) rotate(3deg); }
 }
-.pet.angry .blush { opacity: 1; }
 
-/* ---------- 自检边框层（仅 AUTOTEST 时显示） ---------- */
+/* ---------- 自检边框层（仅 DSH_PET_DEBUG=1 时显示） ---------- */
 .dbg {
   position: absolute;
   inset: 0;
