@@ -115,9 +115,12 @@ function createWindow() {
 }
 
 // ---------- 右键菜单 ----------
-function openMenu() {
-  const menu = Menu.buildFromTemplate([
-    { label: '🐋 鲸鱼娘桌宠 · 阶段0', enabled: false },
+const menuLog = { opened: 0, errors: [], lastAt: null };
+
+// 模板单独抽出来：可以脱离 popup 单独验证，避免自检被模态菜单卡死
+function buildMenuTemplate() {
+  return [
+    { label: '🐋 鲸鱼娘桌宠 · 阶段1', enabled: false },
     { type: 'separator' },
     { label: '永远置顶', type: 'checkbox', checked: win.isAlwaysOnTop(), click: (mi) => win.setAlwaysOnTop(mi.checked, 'floating') },
     { label: '让她说句话', click: () => win.webContents.send('pet:say', '主人……人家在的啦，哼。') },
@@ -131,8 +134,25 @@ function openMenu() {
     { label: '开发者工具', click: () => win.webContents.openDevTools({ mode: 'detach' }) },
     { type: 'separator' },
     { label: '退出（人家要下班了）', click: () => app.quit() },
-  ]);
-  menu.popup({ window: win });
+  ];
+}
+
+function openMenu() {
+  try {
+    menuLog.opened++;
+    menuLog.lastAt = new Date().toISOString();
+    if (!win || win.isDestroyed()) {
+      menuLog.errors.push('win 不存在或已销毁');
+      return false;
+    }
+    const menu = Menu.buildFromTemplate(buildMenuTemplate());
+    menu.popup({ window: win });   // popup 是异步的，不会阻塞主进程
+    return true;
+  } catch (err) {
+    menuLog.errors.push(String(err && err.message || err));
+    console.error('[右键菜单] 打开失败:', err);
+    return false;
+  }
 }
 
 ipcMain.on('pet:context-menu', () => openMenu());
@@ -289,6 +309,8 @@ async function runSelfCheck() {
     // ---------- 第二阶段：交互自动化 ----------
     const inter = await runInteractionTest();
     report.interaction = inter;
+    report.menu = inter.menu;
+    report.rightClickDiag = inter.rightClickDiag;
     for (const c of inter.checks) report.checks.push(c);
     console.log('--- 交互断言 ---');
     for (const c of inter.checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}  (${c.detail})`);
@@ -375,6 +397,84 @@ async function runInteractionTest() {
   push('穿透切换有真实调用记录', csAfter.stats.toggles >= 0, `累计切换 ${csAfter.stats.toggles} 次，探针次数 ${csAfter.stats.probes}`);
   clickThrough.probe(); // 还原真实状态
 
+  // ---------- 真实事件链（真人操作路径，旧版自检漏掉的就是这条） ----------
+  const stateBefore = await js('window.__petTest.state()');
+  const realClick = await js('window.__petTest.realClick()');
+  await wait(150);
+  let s2 = await js('window.__petTest.state()');
+  const clickDelta = s2.clickCount - stateBefore.clickCount;
+  push('真实点击链(mousedown→mouseup→click)触发 click', clickDelta === 1, `click 计数 +${clickDelta}`);
+  push('真实点击后出气泡', s2.bubbleShown === true && s2.bubbleText.length > 0, `text="${s2.bubbleText}" shown=${s2.bubbleShown}`);
+  push('快速点击后未卡在拖拽态（race 回归断言）', realClick.dragging === false && s2.dragging === false,
+    `点击瞬间 dragging=${realClick.dragging}，150ms 后 dragging=${s2.dragging}`);
+
+  // ---------- 右键菜单 ----------
+  const menuBefore = menuLog.opened;
+  const realMenu = await js('window.__petTest.realContextMenu()');
+  await wait(200);
+  push('右键事件被 renderer 捕获并阻止默认行为', realMenu.fired === true && realMenu.defaultPrevented === true,
+    `count=${realMenu.count} from=${realMenu.from} defaultPrevented=${realMenu.defaultPrevented}`);
+  push('右键已送达主进程（IPC 通路）', menuLog.opened === menuBefore + 1,
+    `主进程菜单触发次数 ${menuBefore} → ${menuLog.opened}`);
+  push('菜单模板构建无异常', menuLog.errors.length === 0, `errors=${JSON.stringify(menuLog.errors)}`);
+
+  // ---------- 回归：主人报告的「点击没气泡 / 右键无效」根因 ----------
+  // 旧实现两个错误：① mousedown 里 preventDefault 会抑制 contextmenu
+  //                ② 无阈值即拖动，点一下的微抖动让窗口跟着动 → click 也不产生
+  const jitterClick = await js('window.__petTest.realClickWithJitter(3)');
+  await wait(150);
+  push('微抖动点击(±3px)仍能出气泡（根因①回归）', jitterClick.sayDelta === 1 && jitterClick.clickDelta === 1,
+    `say +${jitterClick.sayDelta}, click +${jitterClick.clickDelta}`);
+
+  const dragChain = await js('window.__petTest.realDrag(30)');
+  await wait(120);
+  push('拖动链仍可用（30px 移动触发拖动）', dragChain.draggingDuring === true && dragChain.draggingAfter === false,
+    `拖动中=${dragChain.draggingDuring} 结束后=${dragChain.draggingAfter}`);
+
+  // mousedown 之后立刻右键：如果 mousedown 里还有 preventDefault，contextmenu 会被抑制
+  const menuBefore2 = menuLog.opened;
+  const mdThenMenu = await js(`(() => {
+    const r = document.getElementById('pet').getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, clientX: r.left + 10, clientY: r.top + 10 };
+    const pet = document.getElementById('pet');
+    const md = new MouseEvent('mousedown', { ...o, button: 0, detail: 1 });
+    pet.dispatchEvent(md);
+    window.dispatchEvent(new MouseEvent('mouseup', { ...o, button: 0, detail: 1 }));
+    const ev = new MouseEvent('contextmenu', { ...o, button: 2 });
+    const ret = pet.dispatchEvent(ev);
+    return {
+      // DOM 规范：preventDefault 生效时 dispatchEvent 返回 false，说明事件正常送达处理器
+      handled: ret === false && ev.defaultPrevented === true,
+      mousedownPrevented: md.defaultPrevented,
+      defaultPrevented: ev.defaultPrevented,
+    };
+  })()`);
+  await wait(200);
+  push('左键按下后紧接右键仍能打开菜单（根因②回归）',
+    mdThenMenu.handled === true && mdThenMenu.mousedownPrevented === false && menuLog.opened === menuBefore2 + 1,
+    `mousedown 被阻止=${mdThenMenu.mousedownPrevented}（必须为 false）菜单次数 ${menuBefore2} → ${menuLog.opened}`);
+  await wait(2900); // 等前面几个气泡都过期，避免污染交互截图
+  const sQuiet = await js('window.__petTest.state()');
+  push('气泡会自动消失', sQuiet.bubbleShown === false, `shown=${sQuiet.bubbleShown}`);
+
+  // 模板可独立验证（不能真的 popup，会阻塞自检）
+  const tpl = buildMenuTemplate();
+  const labels = tpl.filter((i) => i.label).map((i) => i.label);
+  push('菜单项完整', labels.length >= 7 && labels.some((l) => l.includes('摸头')),
+    `共 ${labels.length} 项: ${labels.join(' / ')}`);
+  const clickables = tpl.filter((i) => typeof i.click === 'function').length;
+  push('菜单项都绑定了动作', clickables >= 7, `可点击项 ${clickables}`);
+
+  // 兜底入口：Ctrl+M（不依赖鼠标，万一物理右键进不来也有办法开菜单）
+  const kbBefore = menuLog.opened;
+  const kb = await js('window.__petTest.keyboardMenu()');
+  await wait(200);
+  push('Ctrl+M 兜底入口可用', kb.from === 'keyboard' && menuLog.opened === kbBefore + 1,
+    `来源=${kb.from} 菜单次数 ${kbBefore} → ${menuLog.opened}`);
+
+  // 真机右键诊断快照（主人若再遇到右键无效，这个计数能告诉人家事件卡在哪一层）
+  const diagSnap = await js('window.__petRightDiag ? ({...window.__petRightDiag}) : null');
+
   // 交互中窗口应保持稳定
   const b2 = win.getBounds();
   push('交互后窗口未跑位', Math.abs(b2.width - WIN_W) <= 4 && Math.abs(b2.height - WIN_H) <= 4 && win.isVisible(),
@@ -386,6 +486,8 @@ async function runInteractionTest() {
   return {
     screenshot: path.relative(ROOT, shot),
     finalState: s,
+    menu: { log: menuLog, labels },
+    rightClickDiag: diagSnap,
     checks,
   };
 }

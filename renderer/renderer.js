@@ -29,7 +29,9 @@
   ];
 
   let bubbleTimer = null;
+  let sayCount = 0;
   function say(text, ms = 2600) {
+    sayCount++;
     bubble.textContent = text;
     bubble.classList.add('show');
     clearTimeout(bubbleTimer);
@@ -70,22 +72,36 @@
   });
 
   // ---------- 手动拖动 ----------
+  // 三个必须遵守的约束（都是踩坑换来的，见 devlog round-03）：
+  // 1) 不能在 mousedown 里 await getBounds() 再启动拖动 —— 真人快速点击时 mouseup 先到，
+  //    拖动循环会被漏关，窗口永久粘在鼠标上。
+  // 2) 不能在 mousedown 里 preventDefault() —— Chromium 会因此抑制 contextmenu 事件。
+  // 3) 必须等鼠标真的移动超过阈值（DRAG_THRESHOLD）才开始拖动 —— 否则点一下的细微抖动
+  //    也会让窗口跟着微动，按下/抬起落在不同坐标，click 事件同样不会产生。
+  const DRAG_THRESHOLD = 4; // 逻辑像素
+  let pendingDrag = null;   // { x, y } 按下起点（屏幕坐标）
   let dragging = false;
-  pet.addEventListener('mousedown', async (e) => {
-    if (e.button !== 0 || e.detail > 1) return;
-    const bounds = await window.pet.getBounds();
+
+  pet.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    pendingDrag = { x: Math.round(e.screenX), y: Math.round(e.screenY) };
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!pendingDrag || dragging) return;
+    const dx = Math.round(e.screenX) - pendingDrag.x;
+    const dy = Math.round(e.screenY) - pendingDrag.y;
+    if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return; // 还只是手抖，不算拖动
     dragging = true;
     pet.classList.add('dragging');
     window.pet.dragStart({
       cursorX: Math.round(e.screenX),
       cursorY: Math.round(e.screenY),
-      winX: bounds.x,
-      winY: bounds.y,
     });
-    e.preventDefault();
   });
 
   const stopDrag = () => {
+    pendingDrag = null;
     if (!dragging) return;
     dragging = false;
     pet.classList.remove('dragging');
@@ -93,6 +109,7 @@
   };
   window.addEventListener('mouseup', stopDrag);
   window.addEventListener('blur', stopDrag);
+  window.addEventListener('mouseleave', stopDrag);
 
   pet.addEventListener('click', () => {
     say(pick(CLICK_LINES));
@@ -118,11 +135,39 @@
 
   window.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    window.__petContextMenuCount = (window.__petContextMenuCount || 0) + 1;
+    window.__petContextMenuFrom = (e.target && e.target.tagName ? e.target.tagName : '?') +
+      (e.target && e.target.id ? '#' + e.target.id : '');
     window.pet.openContextMenu();
   });
 
+  // 自检用：把 renderer 里真实发生的点击链记录下来（自动 click() 不触发 mousedown，所以必须记真事件）
+  let clickCount = 0;
+  pet.addEventListener('click', () => { clickCount++; });
+
+  // ---- 右键诊断：把"物理右键事件到底有没有进来"暴露给主进程 ----
+  // 真人反馈过右键无效。合成事件能通过、物理右键不一定，必须留下可读的现场记录。
+  const rightDiag = { mousedown: 0, mouseup: 0, contextmenu: 0, lastAt: null, lastTarget: null };
+  window.addEventListener('mousedown', (e) => {
+    if (e.button === 2) { rightDiag.mousedown++; rightDiag.lastAt = Date.now(); rightDiag.lastTarget = e.target?.tagName; }
+  }, true);
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 2) rightDiag.mouseup++;
+  }, true);
+  window.addEventListener('contextmenu', (e) => {
+    rightDiag.contextmenu++;
+  }, true);
+  window.__petRightDiag = rightDiag;
+
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') window.pet.quit();
+    // 兜底入口：万一物理右键因为平台原因进不来，用 Ctrl+M 照样能开菜单
+    if (e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
+      e.preventDefault();
+      window.__petContextMenuCount = (window.__petContextMenuCount || 0) + 1;
+      window.__petContextMenuFrom = 'keyboard';
+      window.pet.openContextMenu();
+    }
   });
 
   // 自检用：把交互能力暴露成一个可调用入口，让人家能自动验证
@@ -156,12 +201,85 @@
       await new Promise((r) => setTimeout(r, 120));
       window.pet.dragEnd();
       return { bounds, ok: true };
+    },    // 真实事件链测试：模拟真人的 mousedown → mouseup → click（自动 click() 不走 mousedown，
+    // 所以旧版测试根本覆盖不到拖动 race）
+    realClick: () => {
+      const r = pet.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const sx = Math.round(window.screenX + x);
+      const sy = Math.round(window.screenY + y);
+      const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, screenX: sx, screenY: sy, button: 0, detail: 1 };
+      pet.dispatchEvent(new MouseEvent('mousedown', opts));
+      window.dispatchEvent(new MouseEvent('mouseup', opts));
+      pet.dispatchEvent(new MouseEvent('click', opts));
+      return { clickCount, dragging };
+    },
+    // 真实拖动链：mousedown → 移动超过阈值 → 拖动启动 → mouseup 结束
+    realDrag: async (movePx) => {
+      const r = pet.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const base = { bubbles: true, cancelable: true, button: 0, detail: 1 };
+      const sx = Math.round(window.screenX + x);
+      const sy = Math.round(window.screenY + y);
+      pet.dispatchEvent(new MouseEvent('mousedown', { ...base, clientX: x, clientY: y, screenX: sx, screenY: sy }));
+      const m = movePx || 30;
+      window.dispatchEvent(new MouseEvent('mousemove',
+        { ...base, clientX: x + m, clientY: y + m, screenX: sx + m, screenY: sy + m }));
+      await new Promise((res) => setTimeout(res, 120));
+      const draggingDuring = dragging;
+      window.dispatchEvent(new MouseEvent('mouseup',
+        { ...base, clientX: x + m, clientY: y + m, screenX: sx + m, screenY: sy + m }));
+      return { draggingDuring, draggingAfter: dragging };
+    },
+    // 复现主人的真实场景：点一下时鼠标有轻微移动（真人不可能绝对静止）。
+    // 窗口跟着鼠标微动 → 按下和抬起落在不同坐标 → Chromium 不产生 click。
+    realClickWithJitter: (jitterPx) => {
+      const before = { say: sayCount, click: clickCount };
+      const r = pet.getBoundingClientRect();
+      const x = r.left + r.width / 2;
+      const y = r.top + r.height / 2;
+      const base = { bubbles: true, cancelable: true, button: 0, detail: 1 };
+      pet.dispatchEvent(new MouseEvent('mousedown',
+        { ...base, clientX: x, clientY: y, screenX: window.screenX + x, screenY: window.screenY + y }));
+      const j = jitterPx || 0;
+      window.dispatchEvent(new MouseEvent('mouseup',
+        { ...base, clientX: x + j, clientY: y + j, screenX: window.screenX + x + j, screenY: window.screenY + y + j }));
+      pet.dispatchEvent(new MouseEvent('click',
+        { ...base, clientX: x + j, clientY: y + j, screenX: window.screenX + x + j, screenY: window.screenY + y + j }));
+      return { sayDelta: sayCount - before.say, clickDelta: clickCount - before.click, jitter: j };
+    },
+    // 真实右键链：走 window 上的 contextmenu 处理器
+    realContextMenu: () => {
+      const before = window.__petContextMenuCount || 0;
+      const r = pet.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, button: 2, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+      const ev = new MouseEvent('contextmenu', opts);
+      const notCancelled = pet.dispatchEvent(ev);
+      return {
+        fired: (window.__petContextMenuCount || 0) > before,
+        count: window.__petContextMenuCount || 0,
+        from: window.__petContextMenuFrom || null,
+        defaultPrevented: ev.defaultPrevented,
+        notCancelled,
+      };
+    },
+    // 兜底入口测试：模拟 Ctrl+M
+    keyboardMenu: () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', ctrlKey: true, bubbles: true, cancelable: true }));
+      return { count: window.__petContextMenuCount || 0, from: window.__petContextMenuFrom || null };
     },
     state: () => ({
       petClasses: pet.className,
       bubbleShown: bubble.classList.contains('show'),
       bubbleText: bubble.textContent,
       lastHit,
+      clickCount,
+      sayCount,
+      dragging,
+      contextMenuCount: window.__petContextMenuCount || 0,
+      rightDiag: { ...rightDiag },
     }),
   };
 
