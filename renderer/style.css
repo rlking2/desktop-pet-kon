@@ -104,8 +104,12 @@ html, body {
 }
 .pet.sprite-mode .sprite { display: block; }
 .pet.sprite-mode .whale { display: none; }
-/* 帧动画自带动作，关掉 CSS 呼吸/蹦跳，避免叠加成"抖" */
+/* 帧动画自带的动作由素材体现，但"互动变形"（蹦跳/摸头/生气抖动）必须仍然作用于可见元素，
+   否则点了不会有任何反应。所以这些动画同时挂到 canvas 上。 */
 .pet.sprite-mode .whale { animation: none; }
+.pet.hop .sprite { animation: hop .5s ease; }
+.pet.pat .sprite { animation: pat .7s ease; }
+.pet.angry .sprite { animation: angry .4s ease-in-out 3; }
 
 @keyframes breathe {
   0%, 100% { transform: translateY(0) scale(1); }

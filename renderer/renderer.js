@@ -201,19 +201,28 @@
   pet.addEventListener('click', (e) => {
     dlog('click-handler', `气泡台词即将播放，target=${describeTarget(e.target)}`);
     say(pick(CLICK_LINES));
-    playAnim('hop', 520);
+    // 有 happy/hop 素材就播帧动画，否则退回 CSS 形变（两者都不缺）
+    if (!playAction('happy', ['hop'])) playAnim('hop', 520);
   });
 
   // 摸头 / 喂饭 / 生气：由右键菜单或主人台词触发
   window.pet.onAction((name) => {
-    if (name === 'headpat') { say(pick(PAT_LINES)); playAnim('pat', 720); return; }
+    if (name === 'headpat') {
+      say(pick(PAT_LINES));
+      if (!playAction('pet', ['headpat', 'pat'])) playAnim('pat', 720);
+      return;
+    }
     if (name === 'rice') {
       rice += 1;
       say(`${pick(RICE_LINES)}\n（今日已吃 ${rice} 碗白饭）`, 3200);
-      playAnim('hop', 520);
+      if (!playAction('happy', ['hop', 'eat'])) playAnim('hop', 520);
       return;
     }
-    if (name === 'angry') { say(pick(ANGRY_LINES)); playAnim('angry', 1300); return; }
+    if (name === 'angry') {
+      say(pick(ANGRY_LINES));
+      if (!playAction('angry')) playAnim('angry', 1300);
+      return;
+    }
   });
 
   window.pet.onSay((text) => say(text, 3000));
@@ -383,10 +392,12 @@
         available: spriteState.available,
         reason: spriteState.reason,
         groups: spriteState.groups,
+        baseGroup: spriteState.baseGroup,
         activeGroup: spriteState.activeGroup,
         activeFrame: spriteState.activeFrame,
         drewFrames: spriteState.drewFrames,
         modeClass: pet.classList.contains('sprite-mode'),
+        timeline: spriteTimeline ? { group: spriteTimeline.group, loop: spriteTimeline.loop } : null,
       },
     }),
   };
@@ -420,25 +431,52 @@
   }
 
   // 播放器：每个动作一条独立时间线，用 rAF 按"每帧延时"推进
+  // 优先级：摸头(3) > 生气(2) > 开心/点击(1) > 待机(0)
+  // 规则：高优先级可以打断低优先级；低优先级不能打断正在播的高优先级（避免动作打架）
+  const PRIORITY = { pet: 3, angry: 2, happy: 1, idle: 0 };
   let spriteTimeline = null;
-  function playGroup(name, { loop = true, fallbackDelay = 120 } = {}) {
+  let spriteBaseGroup = null; // 待机动作（其他动作播完回到它）
+
+  function playGroup(name, { loop = true, force = false } = {}) {
     const g = spriteGroups[name];
     if (!g || !g.images.length) return false;
-    spriteTimeline = { group: name, loop, delay: g.delays[0] || fallbackDelay };
+    const curPrio = spriteTimeline ? (PRIORITY[spriteTimeline.group] ?? 0) : -1;
+    const newPrio = PRIORITY[name] ?? 0;
+    if (!force && spriteTimeline && !spriteTimeline.finished && newPrio < curPrio) {
+      dlog('sprite-play', `忽略「${name}」(优先级 ${newPrio}) —— 正在播「${spriteTimeline.group}」(优先级 ${curPrio})`);
+      return false;
+    }
+    spriteTimeline = { group: name, loop, finished: false, startedAt: performance.now() };
     drawSpriteFrame(name, 0);
+    dlog('sprite-play', `播放动作「${name}」loop=${loop} 优先级=${newPrio} 帧数=${g.images.length}`);
     return true;
+  }
+
+  // 兼容两种命名：素材里可以叫 happy，也可以叫 hop
+  function playAction(primary, aliases = []) {
+    for (const n of [primary, ...aliases]) {
+      if (spriteGroups[n]) return playGroup(n, { loop: false });
+    }
+    return false; // 没有这组素材 → 交给 CSS 形变动画表现
   }
 
   let lastSpriteAdvance = 0;
   function spriteTick(ts) {
     if (spriteTimeline) {
       const g = spriteGroups[spriteTimeline.group];
-      if (g && ts - lastSpriteAdvance >= (g.delays[spriteState.activeFrame] || spriteTimeline.delay)) {
+      if (g && ts - lastSpriteAdvance >= (g.delays[spriteState.activeFrame] || 120)) {
         lastSpriteAdvance = ts;
         const next = spriteState.activeFrame + 1;
         if (next >= g.images.length) {
-          if (spriteTimeline.loop) drawSpriteFrame(spriteTimeline.group, 0);
-          else { spriteTimeline = null; }
+          if (spriteTimeline.loop) {
+            drawSpriteFrame(spriteTimeline.group, 0);
+          } else {
+            // 单次动作播完 → 回待机
+            spriteTimeline.finished = true;
+            const back = spriteBaseGroup || spriteTimeline.group;
+            spriteTimeline = null;
+            if (spriteGroups[back]) playGroup(back, { loop: true, force: true });
+          }
         } else {
           drawSpriteFrame(spriteTimeline.group, next);
         }
@@ -493,14 +531,27 @@
 
     // 切换显示模式：优先 idle，否则用第一个可用动作
     const primary = spriteGroups.idle ? 'idle' : names[0];
+    spriteBaseGroup = primary;
     pet.classList.add('sprite-mode');
     spriteState.available = true;
     spriteState.groups = names;
     spriteState.reason = '已启用';
-    playGroup(primary, { loop: true });
+    spriteState.baseGroup = primary;
+    playGroup(primary, { loop: true, force: true });
     requestAnimationFrame(spriteTick);
-    dlog('sprite-init', `帧动画已启用：动作=[${names.join(', ')}]，主动作=${primary}，画布=${spriteCanvas.width}x${spriteCanvas.height}`);
-    console.log(`[鲸鱼娘] 帧动画已启用：${names.join(' / ')}（主动作 ${primary}）`);
+    dlog('sprite-init', `帧动画已启用：动作=[${names.join(', ')}]，待机=${primary}，画布=${spriteCanvas.width}x${spriteCanvas.height}`);
+    console.log(`[鲸鱼娘] 帧动画已启用：${names.join(' / ')}（待机 ${primary}）`);
+
+    // ★ 换形象后必须重算穿透掩码：否则点击判定范围还停留在旧形象上
+    // （角色变大了，鼠标移到新的身体部位却会被当成空气穿透掉）
+    setTimeout(() => {
+      try {
+        window.pet.refreshMask();
+        dlog('sprite-init', '已请求重算穿透掩码（形象变了，掩码必须跟着变）');
+      } catch (err) {
+        dlog('sprite-init', '请求重算掩码失败: ' + (err && err.message));
+      }
+    }, 350);
   }
   initSpriteAnimation();
 })();

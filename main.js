@@ -340,6 +340,19 @@ ipcMain.handle('pet:get-bounds', () => {
 // 素材清单：主进程读磁盘 → 渲染层用（避开 CSP 对 fetch 的限制）
 ipcMain.handle('pet:asset-manifest', () => loadAnimationManifest(path.join(ROOT, 'assets')));
 
+// 形象变化后重算穿透掩码（渲染层加载完帧动画会请求一次）
+ipcMain.on('pet:refresh-mask', () => {
+  if (!clickThrough) return;
+  setTimeout(() => {
+    clickThrough.refreshMask()
+      .then((m) => {
+        console.log(`[穿透掩码] 重算完成：实体占比 ${(m.coverage * 100).toFixed(1)}% bbox=${JSON.stringify(m.bbox)}`);
+        logInput({ src: 'main', type: 'mask-refresh', detail: `覆盖率=${m.coverage} bbox=${JSON.stringify(m.bbox)}` });
+      })
+      .catch((e) => console.error('[穿透掩码] 重算失败:', e && e.message));
+  }, 250);
+});
+
 // 穿透探针模式：故意在 穿透 ↔ 可交互 之间来回翻转，
 // 让外部 Win32 探针去读 GWL_EXSTYLE，独立验证 setIgnoreMouseEvents 真的作用到 OS 层。
 // 没有任何窗口状态的"自证"能替代这一步——必须由外部来量。
