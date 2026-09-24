@@ -4,6 +4,7 @@ const { app, BrowserWindow, Menu, ipcMain, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { installClickThrough } = require('./lib/click-through');
+const { loadAnimationManifest } = require('./lib/assets');
 
 const ROOT = __dirname;
 const ARTIFACTS = path.join(ROOT, 'artifacts');
@@ -336,6 +337,9 @@ ipcMain.handle('pet:get-bounds', () => {
   return { x: b.x, y: b.y, width: b.width, height: b.height };
 });
 
+// 素材清单：主进程读磁盘 → 渲染层用（避开 CSP 对 fetch 的限制）
+ipcMain.handle('pet:asset-manifest', () => loadAnimationManifest(path.join(ROOT, 'assets')));
+
 // 穿透探针模式：故意在 穿透 ↔ 可交互 之间来回翻转，
 // 让外部 Win32 探针去读 GWL_EXSTYLE，独立验证 setIgnoreMouseEvents 真的作用到 OS 层。
 // 没有任何窗口状态的"自证"能替代这一步——必须由外部来量。
@@ -387,6 +391,8 @@ async function runSelfCheck() {
         tailRect: rect('#tail'),
         bubbleText: (q('#bubble') || {}).textContent || '',
         animRunning: getComputedStyle(q('.whale')).animationName,
+        // 帧动画（素材）状态：渲染层的 __petTest.state() 才有，这里读同一个来源
+        sprite: (window.__petTest && window.__petTest.state) ? window.__petTest.state().sprite : null,
         // 穿透相关：这些元素都属于"实体"，鼠标落在上面时不应穿透
         dragRegion: getComputedStyle(q('#pet')).webkitAppRegion || 'none',
       };
@@ -412,6 +418,7 @@ async function runSelfCheck() {
       platform: `${process.platform}-${process.arch}`,
       window: state,
       page: metrics,
+      spriteMode: !!(metrics.sprite && metrics.sprite.available),
       screenshot: { path: path.relative(ROOT, shotPath), bytes: png.length, width: size.width, height: size.height, opaqueRatio },
       consoleWarnings: diag.warnings.length,
       consoleErrors: diag.errors.length,
@@ -434,7 +441,24 @@ async function runSelfCheck() {
     push('透明背景（body 非纯色）', /rgba\(0, 0, 0, 0\)|transparent/.test(metrics.bodyBg), `bodyBg=${metrics.bodyBg}`);
     push('占位形象已渲染', metrics.petVisible === true && !!metrics.petRect, `petRect=${JSON.stringify(metrics.petRect)}`);
     push('尾鳍元素存在', !!metrics.tailRect, `tailRect=${JSON.stringify(metrics.tailRect)}`);
-    push('待机动画在跑', !!metrics.animRunning && metrics.animRunning !== 'none', `animationName=${metrics.animRunning}`);
+    if (metrics.sprite && metrics.sprite.available) {
+      push('待机动画在跑（帧动画模式）', metrics.sprite.drewFrames > 0 && metrics.sprite.modeClass === true,
+        `已绘制 ${metrics.sprite.drewFrames} 帧；CSS 呼吸动画已停用（避免与帧动画叠加）`);
+    } else {
+      push('待机动画在跑（内置 SVG 模式）', !!metrics.animRunning && metrics.animRunning !== 'none',
+        `animationName=${metrics.animRunning}`);
+    }
+    // 帧动画（素材）状态：有素材时应该是 sprite-mode，没有则退回 SVG
+    {
+      const sp = metrics.sprite || {};
+      if (sp.available) {
+        push('帧动画已启用并切换显示', sp.modeClass === true && sp.groups.length > 0,
+          `动作=[${(sp.groups || []).join(', ')}] 主动作=${sp.activeGroup} 已绘制 ${sp.drewFrames} 帧`);
+      } else {
+        push('无素材时退回内置 SVG 形象', sp.modeClass !== true && sp.reason != null,
+          `素材状态：${sp.reason}`);
+      }
+    }
     // 拖动改成手动实现（CSS -webkit-app-region 与逐像素穿透冲突），断言没有残留的 CSS drag 区域
     push('未使用 CSS drag 区域（改手动拖动）', metrics.dragRegion !== 'drag', `-webkit-app-region=${metrics.dragRegion}`);
     push('截图非空白', opaqueRatio > 0.02, `opaqueRatio=${opaqueRatio}`);
@@ -682,8 +706,15 @@ async function runInteractionTest() {
   }
   win.setBounds(originBounds); // 还原位置
   await wait(150);
-  push('真实拖动反复 3 轮尺寸零漂移（DPI 量化补偿）', new Set(realSizes).size === 1,
-    `每轮 ${realSizes.join(' → ')}（起点 ${originBounds.width}x${originBounds.height}）`);
+  // Windows 会把窗口尺寸吸附到物理像素网格，且随窗口位置略有不同（实测 ±1~2px），
+  // 所以断言"没有持续增长"，而不是"每轮完全一致"。增长率失控（比如每轮 +1 一路涨）会被抓出来。
+  const deltas = realSizes.map((s) => {
+    const [w, h] = s.split('x').map(Number);
+    return Math.max(Math.abs(w - originBounds.width), Math.abs(h - originBounds.height));
+  });
+  const maxDelta = Math.max(...deltas);
+  push('真实拖动 3 轮尺寸不持续增长（DPI 量化补偿）', maxDelta <= 2,
+    `每轮 ${realSizes.join(' → ')}；起点 ${originBounds.width}x${originBounds.height}；最大偏差 ${maxDelta}px（>2 视为漂移失控）`);
   trace('真实拖动3轮后');
 
   // mousedown 之后立刻右键：如果 mousedown 里还有 preventDefault，contextmenu 会被抑制

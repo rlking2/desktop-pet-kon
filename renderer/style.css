@@ -95,6 +95,18 @@ html, body {
   transform-origin: 50% 82%;
 }
 
+/* 帧动画画布：默认隐藏（没有素材时显示内置 SVG）；有素材时由 JS 加上 .active */
+.sprite {
+  display: none;
+  width: 130px;
+  height: 130px;
+  image-rendering: auto;
+}
+.pet.sprite-mode .sprite { display: block; }
+.pet.sprite-mode .whale { display: none; }
+/* 帧动画自带动作，关掉 CSS 呼吸/蹦跳，避免叠加成"抖" */
+.pet.sprite-mode .whale { animation: none; }
+
 @keyframes breathe {
   0%, 100% { transform: translateY(0) scale(1); }
   50%      { transform: translateY(-3.5px) scale(1.015, .988); }

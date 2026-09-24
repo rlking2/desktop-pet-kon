@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('pet', {
   // 原始输入日志（诊断"真人点击无效"用）
   diag: (events) => ipcRenderer.send('pet:diag', { events }),
 
+  // 素材清单（帧动画）：主进程读磁盘后交给渲染层，避开 CSP 对 fetch 的限制
+  getAssetManifest: () => ipcRenderer.invoke('pet:asset-manifest'),
+
   // 拖动（手动实现，因为 CSS drag 区域与逐像素穿透冲突）
   getBounds: () => ipcRenderer.invoke('pet:get-bounds'),
   dragStart: (payload) => ipcRenderer.send('pet:drag-start', payload),

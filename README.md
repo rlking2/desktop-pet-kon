@@ -6,6 +6,26 @@
 
 ---
 
+## 🎬 换成主人自己的立绘（帧动画）
+
+人家**看不了图片**（当前模型不支持图片输入），所以这套流程是"主人给图、程序干活"：
+
+```powershell
+# 1) 把帧丢进来（两种都行）
+#    散帧序列： assets\idle\frame-01.png, frame-02.png ...
+#    精灵图：   assets\idle.png + assets\idle.json（cols/rows/frameWidth/frameHeight）
+npm run assets          # 体检：帧数/尺寸/透明通道/白底残留，不合格会拦下
+npm run assets:write    # 生成 assets\manifest.json + 对齐后的统一尺寸帧
+npm start               # 自动播放帧动画（没有清单时自动退回内置 SVG 形象）
+```
+
+程序会自动做：**按主体包围盒对齐**（消除从网上截帧导致的"每帧抖动"）、
+统一画布、合并多动作组、校验透明通道与白底残留。
+
+详细说明见 `assets/README.md`。
+
+---
+
 ## 🔎 桌面不听话时怎么自查（主人版）
 
 桌宠每次启动都会写一份**原始输入日志**：`artifacts/input-<时间>.log`

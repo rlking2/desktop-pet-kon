@@ -11,6 +11,8 @@
     <div class="bubble" id="bubble" role="status"></div>
 
     <div class="pet" id="pet" title="拖人家干嘛，哼">
+      <!-- 帧动画画布：assets/ 里有素材时自动启用；没有就用下面的内置 SVG 占位形象 -->
+      <canvas id="sprite" class="sprite" width="130" height="130" aria-hidden="true"></canvas>
       <svg id="whale" class="whale" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" aria-label="蓝色鲸鱼娘占位形象">
         <defs>
           <linearGradient id="gTail" x1="0" y1="0" x2="0" y2="1">

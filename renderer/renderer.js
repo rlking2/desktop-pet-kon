@@ -379,8 +379,128 @@
       dragging,
       contextMenuCount: window.__petContextMenuCount || 0,
       rightDiag: { ...rightDiag },
+      sprite: {
+        available: spriteState.available,
+        reason: spriteState.reason,
+        groups: spriteState.groups,
+        activeGroup: spriteState.activeGroup,
+        activeFrame: spriteState.activeFrame,
+        drewFrames: spriteState.drewFrames,
+        modeClass: pet.classList.contains('sprite-mode'),
+      },
     }),
   };
 
   console.log('[鲸鱼娘] 桌宠已就位，尾鳍在线。');
+
+  // ---------- 帧动画播放器 ----------
+  // 素材来自 assets/（由 scripts/inspect-assets.js --write 生成 manifest.json），
+  // 通过 preload 的 getAssetManifest() 拿到（主进程读磁盘，绕开 CSP 对 fetch 的限制）。
+  // 没有素材 → 保持内置 SVG 占位形象，零配置。
+  const spriteCanvas = document.getElementById('sprite');
+  const spriteCtx = spriteCanvas ? spriteCanvas.getContext('2d') : null;
+  const spriteGroups = {};
+  let spriteState = { available: false, reason: '未加载', groups: [], activeGroup: null, activeFrame: 0, drewFrames: 0 };
+
+  function drawSpriteFrame(group, idx) {
+    const g = spriteGroups[group];
+    if (!g || !g.images[idx] || !spriteCtx) return false;
+    const img = g.images[idx];
+    if (!img.complete || !img.naturalWidth) return false;
+    const W = spriteCanvas.width, H = spriteCanvas.height;
+    // 等比缩放铺满画布并居中（保持像素比例，不拉伸变形）
+    const scale = Math.min(W / img.naturalWidth, H / img.naturalHeight);
+    const w = img.naturalWidth * scale, h = img.naturalHeight * scale;
+    spriteCtx.clearRect(0, 0, W, H);
+    spriteCtx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+    spriteState.activeGroup = group;
+    spriteState.activeFrame = idx;
+    spriteState.drewFrames++;
+    return true;
+  }
+
+  // 播放器：每个动作一条独立时间线，用 rAF 按"每帧延时"推进
+  let spriteTimeline = null;
+  function playGroup(name, { loop = true, fallbackDelay = 120 } = {}) {
+    const g = spriteGroups[name];
+    if (!g || !g.images.length) return false;
+    spriteTimeline = { group: name, loop, delay: g.delays[0] || fallbackDelay };
+    drawSpriteFrame(name, 0);
+    return true;
+  }
+
+  let lastSpriteAdvance = 0;
+  function spriteTick(ts) {
+    if (spriteTimeline) {
+      const g = spriteGroups[spriteTimeline.group];
+      if (g && ts - lastSpriteAdvance >= (g.delays[spriteState.activeFrame] || spriteTimeline.delay)) {
+        lastSpriteAdvance = ts;
+        const next = spriteState.activeFrame + 1;
+        if (next >= g.images.length) {
+          if (spriteTimeline.loop) drawSpriteFrame(spriteTimeline.group, 0);
+          else { spriteTimeline = null; }
+        } else {
+          drawSpriteFrame(spriteTimeline.group, next);
+        }
+      }
+    }
+    requestAnimationFrame(spriteTick);
+  }
+
+  async function initSpriteAnimation() {
+    if (!spriteCtx) { spriteState.reason = '页面里没有 #sprite 画布'; return; }
+    let manifest = null;
+    try {
+      manifest = await window.pet.getAssetManifest();
+    } catch (err) {
+      spriteState.reason = '获取素材清单失败: ' + (err && err.message);
+      dlog('sprite-init', spriteState.reason);
+      return;
+    }
+    if (!manifest || !manifest.found || !manifest.ok) {
+      spriteState.reason = (manifest && (manifest.reason || (manifest.problems || []).join('; '))) || '没有素材';
+      dlog('sprite-init', `未启用帧动画（${spriteState.reason}），使用内置 SVG 形象`);
+      return;
+    }
+    if (manifest.problems && manifest.problems.length) {
+      dlog('sprite-init', '素材清单有告警: ' + manifest.problems.join('; '));
+    }
+
+    // 预加载全部帧
+    for (const [name, g] of Object.entries(manifest.groups)) {
+      const images = [];
+      const delays = [];
+      await Promise.all(g.frames.map((f, i) => new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => { images[i] = img; delays[i] = f.delayMs; resolve(true); };
+        img.onerror = () => { resolve(false); };
+        img.src = f.url;
+      })));
+      const loaded = images.filter((im) => im && im.naturalWidth).length;
+      if (loaded !== g.frames.length) {
+        dlog('sprite-load', `动作「${name}」只加载成功 ${loaded}/${g.frames.length} 帧，跳过该动作`);
+        continue;
+      }
+      spriteGroups[name] = { images, delays, frameCount: g.frameCount, canvas: g.canvas };
+    }
+
+    const names = Object.keys(spriteGroups);
+    if (!names.length) {
+      spriteState.reason = '所有动作的帧都没能加载';
+      dlog('sprite-init', spriteState.reason);
+      return;
+    }
+
+    // 切换显示模式：优先 idle，否则用第一个可用动作
+    const primary = spriteGroups.idle ? 'idle' : names[0];
+    pet.classList.add('sprite-mode');
+    spriteState.available = true;
+    spriteState.groups = names;
+    spriteState.reason = '已启用';
+    playGroup(primary, { loop: true });
+    requestAnimationFrame(spriteTick);
+    dlog('sprite-init', `帧动画已启用：动作=[${names.join(', ')}]，主动作=${primary}，画布=${spriteCanvas.width}x${spriteCanvas.height}`);
+    console.log(`[鲸鱼娘] 帧动画已启用：${names.join(' / ')}（主动作 ${primary}）`);
+  }
+  initSpriteAnimation();
 })();

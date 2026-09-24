@@ -1,0 +1,431 @@
+// 素材探测器：不靠眼睛看图，用像素统计把"这套图能不能用"讲清楚。
+//
+// 支持两种输入：
+//   1) 散帧 PNG 序列：assets/<组名>/*.png（按文件名排序当作帧序）
+//   2) 精灵图 spritesheet：assets/<组名>.png + assets/<组名>.json（描述 cols/rows/frameWidth/frameHeight）
+//
+// 为什么需要它：桌宠是逐像素穿透 + 自动自检的程序，素材一旦"尺寸不一致 / 没有 alpha 通道 /
+// 帧间跳动"，后面会连锁出问题（穿透错位、动画抖动）。所以进来先体检。
+//
+// 用法:
+//   node scripts/inspect-assets.js                 # 体检 assets/ 下所有素材组
+//   node scripts/inspect-assets.js <组名>          # 只体检某组
+//   node scripts/inspect-assets.js --write         # 顺手生成 manifest.json（含对齐偏移与统一画布）
+
+const fs = require('node:fs');
+const path = require('node:path');
+const zlib = require('node:zlib');
+
+const ROOT = path.join(__dirname, '..');
+const ASSETS = path.join(ROOT, 'assets');
+const ALPHA_MIN = 16;
+
+// ---------- PNG 解码（8bit，非隔行，支持 RGBA/RGB/灰度） ----------
+function decodePNG(buf) {
+  if (buf.readUInt32BE(0) !== 0x89504e47) throw new Error('不是 PNG');
+  let pos = 8, width = 0, height = 0, bitDepth = 0, colorType = 0;
+  const idat = [];
+  while (pos < buf.length) {
+    const len = buf.readUInt32BE(pos);
+    const type = buf.toString('ascii', pos + 4, pos + 8);
+    const data = buf.subarray(pos + 8, pos + 8 + len);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      bitDepth = data[8]; colorType = data[9];
+      if (data[12] !== 0) throw new Error('不支持隔行扫描 PNG');
+      if (bitDepth !== 8) throw new Error(`不支持 ${bitDepth}bit PNG（需要 8bit）`);
+    } else if (type === 'IDAT') idat.push(data);
+    else if (type === 'IEND') break;
+    pos += 12 + len;
+  }
+  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 }[colorType];
+  if (!channels) throw new Error('不支持的颜色类型 ' + colorType);
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * channels;
+  const out = Buffer.alloc(width * height * 4);
+  let prev = Buffer.alloc(stride), rp = 0;
+  for (let y = 0; y < height; y++) {
+    const filter = raw[rp++];
+    const line = Buffer.from(raw.subarray(rp, rp + stride));
+    rp += stride;
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? line[i - channels] : 0;
+      const b = prev[i];
+      const c = i >= channels ? prev[i - channels] : 0;
+      let v = line[i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        v += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+      }
+      line[i] = v & 0xff;
+    }
+    prev = line;
+    for (let x = 0; x < width; x++) {
+      const s = x * channels, d = (y * width + x) * 4;
+      if (channels === 4) { out[d] = line[s]; out[d + 1] = line[s + 1]; out[d + 2] = line[s + 2]; out[d + 3] = line[s + 3]; }
+      else if (channels === 3) { out[d] = line[s]; out[d + 1] = line[s + 1]; out[d + 2] = line[s + 2]; out[d + 3] = 255; }
+      else if (channels === 1) { out[d] = out[d + 1] = out[d + 2] = line[s]; out[d + 3] = 255; }
+      else { out[d] = out[d + 1] = out[d + 2] = line[s]; out[d + 3] = line[s + 1]; }
+    }
+  }
+  return { width, height, rgba: out, hasAlphaChannel: colorType === 4 || colorType === 6 };
+}
+
+// ---------- 单帧统计 ----------
+function analyzeFrame(img) {
+  const { width: W, height: H, rgba } = img;
+  let minX = W, minY = H, maxX = -1, maxY = -1, opaque = 0;
+  let partial = 0; // 半透明像素数（抗锯齿边缘）
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const a = rgba[(y * W + x) * 4 + 3];
+      if (a >= ALPHA_MIN) {
+        opaque++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      if (a > 0 && a < 250) partial++;
+    }
+  }
+  const fullOpaque = (() => { // 完全不透明的像素（可能是白色背景没抠干净）
+    let c = 0;
+    for (let i = 3; i < rgba.length; i += 4) if (rgba[i] === 255) c++;
+    return c;
+  })();
+  return {
+    width: W, height: H, opaque,
+    hasAlphaChannel: img.hasAlphaChannel,
+    coverage: +(opaque / (W * H)).toFixed(4),
+    // 「整帧不透明占比」= alpha≥16 的像素比例。接近 1 说明背景没抠掉（多半是白底残留）
+    opaqueRatio: +(opaque / (W * H)).toFixed(4),
+    fullOpaqueRatio: +(fullOpaque / (W * H)).toFixed(4),
+    partialRatio: +(partial / (W * H)).toFixed(4),
+    bbox: maxX < 0 ? null : { minX, minY, maxX, maxY, w: maxX - minX + 1, h: maxY - minY + 1 },
+  };
+}
+
+// 把一帧按偏移画进统一画布
+function blitTo(dst, dstW, dstH, src, srcW, srcH, offX, offY) {
+  for (let y = 0; y < srcH; y++) {
+    const ty = y + offY;
+    if (ty < 0 || ty >= dstH) continue;
+    for (let x = 0; x < srcW; x++) {
+      const tx = x + offX;
+      if (tx < 0 || tx >= dstW) continue;
+      const si = (y * srcW + x) * 4, di = (ty * dstW + tx) * 4;
+      const a = src[si + 3];
+      if (a === 0) continue;
+      if (a === 255) {
+        dst[di] = src[si]; dst[di + 1] = src[si + 1]; dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+      } else {
+        // 简单按 alpha 覆盖（源在上）
+        const sa = a / 255;
+        dst[di] = Math.round(src[si] * sa + dst[di] * (1 - sa));
+        dst[di + 1] = Math.round(src[si + 1] * sa + dst[di + 1] * (1 - sa));
+        dst[di + 2] = Math.round(src[si + 2] * sa + dst[di + 2] * (1 - sa));
+        dst[di + 3] = Math.max(dst[di + 3], a);
+      }
+    }
+  }
+}
+
+function encodePNG(W, H, rgba) {
+  const raw = Buffer.alloc((W * 4 + 1) * H);
+  for (let y = 0; y < H; y++) {
+    raw[y * (W * 4 + 1)] = 0; // filter 0
+    rgba.copy(raw, y * (W * 4 + 1) + 1, y * W * 4, (y + 1) * W * 4);
+  }
+  const crcTable = (() => {
+    const t = new Int32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
+    return t;
+  })();
+  const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const t = Buffer.from(type, 'ascii');
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([t, data])));
+    return Buffer.concat([len, t, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+// 判断一个 .png 是不是精灵图：必须存在同名 .json，且 json 里有 cols/rows/frameWidth/frameHeight
+function readSheetMeta(pngPath) {
+  const jsonPath = pngPath.replace(/\.png$/i, '.json');
+  if (!fs.existsSync(jsonPath)) return null;
+  try {
+    const meta = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+    const ok = ['cols', 'rows', 'frameWidth', 'frameHeight'].every((k) => typeof meta[k] === 'number' && meta[k] > 0);
+    return ok ? { jsonPath, meta } : null;
+  } catch { return null; }
+}
+
+function loadGroups() {
+  if (!fs.existsSync(ASSETS)) return { groups: [], loose: [] };
+  const groups = [];
+  const loose = [];
+
+  // 扫描一个目录：先认"目录里的精灵图（png+json）"，再把散帧收成序列
+  function scanDir(dir, label, depth) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    // 1) 目录里的精灵图
+    for (const e of entries) {
+      if (e.isFile() && /\.png$/i.test(e.name)) {
+        const full = path.join(dir, e.name);
+        const sheet = readSheetMeta(full);
+        if (sheet) {
+          const base = e.name.replace(/\.png$/i, '');
+          groups.push({ name: label ? `${label}/${base}` : base, kind: 'spritesheet', file: full, jsonPath: sheet.jsonPath });
+        } else if (!label) {
+          loose.push(e.name); // 只在 assets 根目录提示孤立 PNG，避免噪音
+        }
+      }
+    }
+
+    // 2) 目录里的散帧序列（排除已识别为精灵图的 png）
+    const sheetNames = new Set(groups.filter((g) => g.dir === dir).map((g) => path.basename(g.file)));
+    const seqFiles = entries
+      .filter((e) => e.isFile() && /\.png$/i.test(e.name) && !sheetNames.has(e.name))
+      .filter((e) => !readSheetMeta(path.join(dir, e.name)))
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    if (seqFiles.length && label) groups.push({ name: label, kind: 'sequence', dir, files: seqFiles });
+
+    // 3) 子目录（最多两层；下划线开头的是内部测试夹具，build 是生成产物，都不参与运行时素材）
+    if (depth < 2) {
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        if (e.name.startsWith('_') || e.name === 'build') continue;
+        scanDir(path.join(dir, e.name), label ? `${label}/${e.name}` : e.name, depth + 1);
+      }
+    }
+  }
+
+  scanDir(ASSETS, '', 0);
+  return { groups, loose };
+}
+
+function inspectGroup(group, opts) {
+  const result = { name: group.name, kind: group.kind, frames: [], problems: [], warnings: [] };
+  let sheetMeta = null;
+  if (group.kind === 'spritesheet') {
+    sheetMeta = JSON.parse(fs.readFileSync(group.jsonPath, 'utf8'));
+  }
+
+  const fileList = group.kind === 'sequence'
+    ? group.files.map((f) => path.join(group.dir, f))
+    : [group.file];
+
+  let sheet = null;
+  if (group.kind === 'spritesheet') {
+    sheet = decodePNG(fs.readFileSync(group.file));
+    result.sheet = { width: sheet.width, height: sheet.height, ...sheetMeta };
+    if (!sheetMeta) throw new Error(`精灵图 ${group.name} 缺少 ${group.name}.json 描述文件`);
+    const { cols, rows, frameWidth, frameHeight } = { ...sheetMeta };
+    if (!cols || !rows || !frameWidth || !frameHeight) throw new Error('json 需要 cols/rows/frameWidth/frameHeight');
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const sub = Buffer.alloc(frameWidth * frameHeight * 4);
+        for (let y = 0; y < frameHeight; y++) {
+          const sy = r * frameHeight + y;
+          if (sy >= sheet.height) break;
+          for (let x = 0; x < frameWidth; x++) {
+            const sx = c * frameWidth + x;
+            if (sx >= sheet.width) break;
+            const si = (sy * sheet.width + sx) * 4, di = (y * frameWidth + x) * 4;
+            sub[di] = sheet.rgba[si]; sub[di + 1] = sheet.rgba[si + 1];
+            sub[di + 2] = sheet.rgba[si + 2]; sub[di + 3] = sheet.rgba[si + 3];
+          }
+        }
+        const img = { width: frameWidth, height: frameHeight, rgba: sub };
+        result.frames.push({ index: r * cols + c, file: `${group.name}.png[${r},${c}]`, ...analyzeFrame(img), _img: img });
+      }
+    }
+  } else {
+    for (let i = 0; i < fileList.length; i++) {
+      const f = fileList[i];
+      try {
+        const img = decodePNG(fs.readFileSync(f));
+        result.frames.push({ index: i, file: path.basename(f), ...analyzeFrame(img), _img: img });
+      } catch (err) {
+        result.problems.push(`第 ${i} 帧 ${path.basename(f)} 解码失败: ${err.message}`);
+      }
+    }
+  }
+
+  if (!result.frames.length) {
+    result.problems.push('没有可用帧');
+    return result;
+  }
+
+  // ---- 体检项 ----
+  const sizes = new Set(result.frames.map((f) => `${f.width}x${f.height}`));
+  if (sizes.size > 1) {
+    result.warnings.push(`帧尺寸不一致（${[...sizes].join(', ')}）→ 生成清单时会自动对齐到统一画布`);
+  }
+  const noAlphaChannel = result.frames.filter((f) => f.hasAlphaChannel === false);
+  if (noAlphaChannel.length) {
+    result.problems.push(`${noAlphaChannel.length} 帧的 PNG 没有 alpha 通道（第 ${noAlphaChannel.map((f) => f.index).join(',')} 帧）`
+      + ' → 桌宠会变成一个方块，必须先抠掉背景再导出带透明通道的 PNG');
+  }
+  // 有 alpha 通道但背景没抠干净：整帧几乎全不透明
+  const fullBg = result.frames.filter((f) => f.hasAlphaChannel !== false && f.opaqueRatio > 0.97);
+  if (fullBg.length) {
+    result.problems.push(`${fullBg.length} 帧几乎整帧不透明（第 ${fullBg.map((f) => f.index).join(',')} 帧）`
+      + ' → 背景没抠干净（残留了整块背景色），要么重新抠图，要么这组图不能直接用');
+  }
+  const empty = result.frames.filter((f) => f.opaque < 20);
+  if (empty.length) result.problems.push(`${empty.length} 帧几乎是空的（第 ${empty.map((f) => f.index).join(',')} 帧）`);
+
+  const covs = result.frames.map((f) => f.coverage);
+  const covMin = Math.min(...covs), covMax = Math.max(...covs);
+  if (covMax - covMin > 0.25) {
+    result.warnings.push(`帧间主体面积波动大（${(covMin * 100).toFixed(1)}% ~ ${(covMax * 100).toFixed(1)}%）→ 可能是不同动作混在一组`);
+  }
+
+  if (result.frames[0].bbox) {
+    const ws = result.frames.map((f) => f.bbox && f.bbox.w).filter(Boolean);
+    const hs = result.frames.map((f) => f.bbox && f.bbox.h).filter(Boolean);
+    result.contentSize = { wMin: Math.min(...ws), wMax: Math.max(...ws), hMin: Math.min(...hs), hMax: Math.max(...hs) };
+  }
+
+  // ---- 生成对齐后的清单 ----
+  const pad = 2;
+  const canvasW = Math.max(...result.frames.map((f) => f.bbox ? f.bbox.w : 0)) + pad * 2;
+  const canvasH = Math.max(...result.frames.map((f) => f.bbox ? f.bbox.h : 0)) + pad * 2;
+  result.canvas = { width: canvasW, height: canvasH };
+  result.aligned = result.frames.map((f) => {
+    // 以"内容包围盒"对齐：每帧主体贴到画布中心（避免原图四周留白不一致导致抖动）
+    const offX = f.bbox ? Math.round((canvasW - f.bbox.w) / 2 - f.bbox.minX) : 0;
+    const offY = f.bbox ? Math.round((canvasH - f.bbox.h) / 2 - f.bbox.minY) : 0;
+    return { index: f.index, file: f.file, offsetX: offX, offsetY: offY };
+  });
+
+  if (opts.write) {
+    // 产物统一放 assets/build/frames/<组名>/，既不会污染素材组，也不会被扫描器当成新素材
+    const safeName = group.name.replace(/[\\/]/g, '__');
+    const framesDir = path.join(ASSETS, 'build', 'frames', safeName);
+    fs.mkdirSync(framesDir, { recursive: true });
+    const written = [];
+    for (const f of result.frames) {
+      const a = result.aligned.find((x) => x.index === f.index);
+      const canvas = Buffer.alloc(canvasW * canvasH * 4);
+      blitTo(canvas, canvasW, canvasH, f._img.rgba, f.width, f.height, a.offsetX, a.offsetY);
+      const name = `frame-${String(f.index).padStart(3, '0')}.png`;
+      fs.writeFileSync(path.join(framesDir, name), encodePNG(canvasW, canvasH, canvas));
+      written.push(name);
+    }
+    const groupEntry = {
+      canvas: { width: canvasW, height: canvasH },
+      defaultDelayMs: 120,
+      frames: written.map((name, i) => ({
+        file: path.relative(ASSETS, path.join(framesDir, name)).replace(/\\/g, '/'),
+        delayMs: 120,
+        index: i,
+      })),
+    };
+    // ★ 合并成 assets/manifest.json（运行时只读这一份，能同时容纳多个动作组）
+    const mergedPath = path.join(ASSETS, 'manifest.json');
+    let merged = { groups: {} };
+    if (fs.existsSync(mergedPath)) {
+      try {
+        const prev = JSON.parse(fs.readFileSync(mergedPath, 'utf8'));
+        merged = prev.groups ? prev : { groups: { [prev.group || 'idle']: prev } };
+      } catch { merged = { groups: {} }; }
+    }
+    merged.groups[group.name] = groupEntry;
+    merged.generatedAt = new Date().toISOString();
+    fs.writeFileSync(mergedPath, JSON.stringify(merged, null, 2));
+
+    result.wrote = {
+      framesDir: path.relative(ROOT, framesDir),
+      manifest: path.relative(ROOT, mergedPath),
+      count: written.length,
+      groups: Object.keys(merged.groups),
+    };
+  }
+
+  // 去掉大对象，避免打印时爆炸
+  result.frames = result.frames.map(({ _img, ...rest }) => rest);
+  return result;
+}
+
+// ---------- 主流程 ----------
+const args = process.argv.slice(2);
+const write = args.includes('--write');
+const only = args.find((a) => !a.startsWith('--'));
+
+if (!fs.existsSync(ASSETS)) {
+  fs.mkdirSync(ASSETS, { recursive: true });
+  fs.writeFileSync(path.join(ASSETS, 'README.txt'),
+    '把素材放这里：\r\n' +
+    '  散帧序列：assets\\<组名>\\*.png   （按文件名排序当作帧序，例如 idle-01.png, idle-02.png）\r\n' +
+    '  精灵图：  assets\\<组名>.png + assets\\<组名>.json\r\n' +
+    '             json 内容示例：{"cols":4,"rows":2,"frameWidth":128,"frameHeight":128}\r\n' +
+    '放好后运行：node scripts\\inspect-assets.js --write\r\n');
+  console.log('assets\\ 目录已创建，并放了一份说明 README.txt。');
+  console.log('主人把 PNG 丢进去之后再跑一次人家就行。');
+  process.exit(0);
+}
+
+const loaded = loadGroups();
+const groups = loaded.groups.filter((g) => !only || g.name === only || g.name.split('/').includes(only));
+if (loaded.loose.length) {
+  console.log(`提示：assets\\ 下有 ${loaded.loose.length} 个孤立 PNG（没有同名 .json 描述，按单图忽略）：${loaded.loose.join(', ')}`);
+  console.log('      若它们是精灵图，请补一份 <同名>.json：{"cols":4,"rows":2,"frameWidth":128,"frameHeight":128}');
+  console.log('      若是一个序列，请放进子目录：assets\\<组名>\\*.png\n');
+}
+if (!groups.length) {
+  console.log('assets\\ 下没有找到素材组。');
+  console.log('散帧序列放成：assets\\<组名>\\*.png');
+  console.log('精灵图放成：  assets\\<组名>.png + assets\\<组名>.json');
+  process.exit(0);
+}
+
+let anyProblem = false;
+for (const g of groups) {
+  console.log(`\n===== 素材组「${g.name}」（${g.kind === 'sequence' ? '散帧序列' : '精灵图'}）=====`);
+  let r;
+  try { r = inspectGroup(g, { write }); }
+  catch (err) { console.log(`FAIL  无法解析: ${err.message}`); anyProblem = true; continue; }
+
+  console.log(`帧数: ${r.frames.length}`);
+  if (r.sheet) console.log(`精灵图: ${r.sheet.width}x${r.sheet.height}  ${r.sheet.cols}列 x ${r.sheet.rows}行  单帧 ${r.sheet.frameWidth}x${r.sheet.frameHeight}`);
+  if (r.contentSize) console.log(`主体尺寸范围: 宽 ${r.contentSize.wMin}~${r.contentSize.wMax}  高 ${r.contentSize.hMin}~${r.contentSize.hMax}`);
+  console.log(`统一画布: ${r.canvas.width}x${r.canvas.height}`);
+  console.log('逐帧:');
+  for (const f of r.frames.slice(0, 12)) {
+    console.log(`  #${String(f.index).padStart(2)} ${String(f.file).padEnd(18)} ${f.width}x${f.height}  主体占比 ${(f.coverage * 100).toFixed(1)}%`
+      + `  不透明满像素 ${(f.fullOpaqueRatio * 100).toFixed(1)}%  bbox=${f.bbox ? `${f.bbox.w}x${f.bbox.h}@(${f.bbox.minX},${f.bbox.minY})` : '无'}`);
+  }
+  if (r.frames.length > 12) console.log(`  ...（共 ${r.frames.length} 帧）`);
+
+  for (const w of r.warnings) console.log(`WARN  ${w}`);
+  for (const p of r.problems) console.log(`FAIL  ${p}`);
+  if (r.problems.length) anyProblem = true;
+  if (r.wrote) console.log(`已输出: ${r.wrote.manifest} + ${r.wrote.count} 张对齐帧 → ${r.wrote.framesDir}`);
+}
+
+console.log(`\n===== 结论: ${anyProblem ? '❌ 有问题，先看上面的 FAIL' : '✅ 素材可用'} =====`);
+if (!write && !anyProblem) console.log('（加 --write 可以生成对齐帧与 manifest.json）');
+process.exit(anyProblem ? 2 : 0);

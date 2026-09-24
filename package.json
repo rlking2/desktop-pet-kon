@@ -9,6 +9,9 @@
     "start:debug": "node scripts/start-debug.js",
     "autotest": "node scripts/autotest.js",
     "inspect": "node scripts/inspect-image.js",
+    "assets": "node scripts/inspect-assets.js",
+    "assets:write": "node scripts/inspect-assets.js --write",
+    "fixtures": "node scripts/make-test-assets.js",
     "probe:clickthrough": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probe-clickthrough.ps1",
     "verify": "npm run autotest && npm run inspect"
   },
