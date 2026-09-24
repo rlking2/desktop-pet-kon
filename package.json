@@ -14,7 +14,8 @@
     "fixtures": "node scripts/make-test-assets.js",
     "probe:clickthrough": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probe-clickthrough.ps1",
     "verify": "npm run autotest && npm run inspect",
-    "assets:list": "node scripts/list-assets.js"
+    "assets:list": "node scripts/list-assets.js",
+    "assets:bg": "node scripts/analyze-bg.js"
   },
   "author": "",
   "license": "MIT",
