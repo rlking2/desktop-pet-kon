@@ -111,7 +111,6 @@
   const memoCountEl = document.getElementById('memoCount');
   const memoCapEl = document.getElementById('memoCap');
   const memoFoot = document.getElementById('memoFoot');
-  const memoClose = document.getElementById('memoClose');
   if (memoCapEl) memoCapEl.textContent = String(MEMO_VISIBLE);
 
   const memoState = { open: false, tasks: [], renders: 0, removed: 0, added: 0, opens: 0, closes: 0, scrollable: false };
@@ -266,9 +265,29 @@
       }
     });
   }
-  if (memoClose) memoClose.addEventListener('click', closeMemo);
   loadTasks();
   renderMemo();
+
+  // ---------- 关闭面板的三种方式（主人要求：去掉 × 号，点区域外自动关闭） ----------
+  // 1) mousedown 落在面板与角色之外（同一窗口内的空白区）→ 关闭
+  // 2) 点角色本身 → 由 pet 的 click 处理器 toggle（这里不重复处理，避免打架）
+  // 3) 点窗口外面的桌面：透明窗口把鼠标事件穿透出去了，渲染层**收不到任何事件**，
+  //    所以这条必须靠主进程轮询鼠标位置来兜底（见 pet:pointer-outside）
+  document.addEventListener('mousedown', (e) => {
+    if (!memoState.open) return;
+    const t = e.target;
+    if (memoEl && memoEl.contains(t)) return;   // 点面板内部 → 不关
+    if (pet.contains(t)) return;                 // 点角色 → 交给 click 处理器 toggle
+    dlog('memo', `点击面板外（${describeTarget(t)}）→ 收起面板`);
+    closeMemo();
+  }, true);
+
+  // 主进程发现鼠标已移出整个窗口 → 通知收起（穿透态下渲染层收不到事件，只能这样兜）
+  window.pet.onPointerOutside(() => {
+    if (!memoState.open) return;
+    dlog('memo', '鼠标已离开窗口（穿透态）→ 收起面板');
+    closeMemo();
+  });
 
   // ---------- 气泡自动翻面（窗口贴屏幕顶部时改从下方弹出） ----------
   let flipShown = null;
@@ -709,6 +728,7 @@
       inputValue: memoInput ? memoInput.value : null,
       foot: memoFoot ? memoFoot.textContent : '',
       panelVisible: !!(memoEl && memoEl.classList.contains('show')),
+      closeButtonExists: !!document.getElementById('memoClose'),
       panelRect: memoEl ? (() => { const r = memoEl.getBoundingClientRect();
         return { top: Math.round(r.top), left: Math.round(r.left), w: Math.round(r.width), h: Math.round(r.height) }; })() : null,
       panelInViewport: memoEl ? (() => { const r = memoEl.getBoundingClientRect();

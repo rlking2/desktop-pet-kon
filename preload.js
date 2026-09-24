@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('pet', {
   // 待办面板：展开时需要更宽的窗口（并重算穿透掩码），收起时还原
   setPanel: (open) => ipcRenderer.send('pet:set-panel', { open: !!open }),
   onPanelSide: (cb) => ipcRenderer.on('pet:panel-side', (_e, side) => cb(side)),
+  // 鼠标离开整个窗口（主进程探测，穿透态下渲染层收不到事件）
+  onPointerOutside: (cb) => ipcRenderer.on('pet:pointer-outside', () => cb()),
   focusWindow: () => ipcRenderer.send('pet:focus-window'),
 
   // 拖动（手动实现，因为 CSS drag 区域与逐像素穿透冲突）

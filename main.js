@@ -99,7 +99,14 @@ function createWindow() {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   // 鼠标穿透：透明区域放行给桌面，实体像素才可点可拖
-  clickThrough = installClickThrough(win);
+  clickThrough = installClickThrough(win, {
+    // 鼠标离开整个窗口 → 通知渲染层（用于"点区域外自动关闭待办面板"）
+    // 为什么必须由主进程来报：窗口透明，鼠标移出后点击会穿透到桌面，渲染层收不到事件
+    onPointerOutside: () => {
+      if (!win || win.isDestroyed()) return;
+      win.webContents.send('pet:pointer-outside');
+    },
+  });
   win.on('closed', () => { if (clickThrough) clickThrough.dispose(); });
 
   // 菜单要尽早设置并隐藏：晚设会把窗口高度撑大几像素（Windows 会为菜单栏预留空间）
@@ -639,6 +646,8 @@ async function runSelfCheck() {
         `focused=${opened.inputFocused}`);
       push('面板完整在窗口内（不会被裁掉）', opened.panelInViewport === true,
         `panelRect=${JSON.stringify(opened.panelRect)}`);
+      push('面板里已没有 × 关闭按钮', opened.closeButtonExists === false,
+        `#memoClose 存在=${opened.closeButtonExists}`);
 
       // 添加任务（走真实的输入框回车路径）
       const added = await js(`(() => {
@@ -774,6 +783,35 @@ async function runSelfCheck() {
         `实体占比=${maskOpenState.stats.maskCoverage} bbox=${JSON.stringify(maskOpenState.stats.maskBbox)}`);
 
       report.memo = { opened, withTasks, afterDone, full };
+
+      // ---------- 关闭方式（放在最后：关闭动作会隐藏面板，会干扰上面的测量） ----------
+      // 1) 点面板内部 → 不应关闭
+      await js('window.__petTest.memoOpen()');
+      await wait(600);
+      await js(`(() => { const el = document.getElementById('memoList');
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 })); })()`);
+      await wait(250);
+      const afterInside = await js('window.__petTest.memoSnapshot()');
+      push('点面板内部不会关闭', afterInside.open === true, `点 memoList 后 open=${afterInside.open}`);
+      // 2) 点面板外的窗口空白区 → 应关闭
+      await js(`(() => { document.documentElement.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 })); })()`);
+      await wait(800);
+      const afterOutside = await js('window.__petTest.memoSnapshot()');
+      push('点面板外的空白区 → 自动关闭',
+        afterOutside.open === false && afterOutside.panelVisible === false,
+        `点窗口空白后 open=${afterOutside.open} visible=${afterOutside.panelVisible}`);
+      // 3) 鼠标离开整个窗口（主进程探测到）→ 应关闭
+      await js('window.__petTest.memoOpen()');
+      await wait(700);
+      const reopened = await js('window.__petTest.memoSnapshot()');
+      win.webContents.send('pet:pointer-outside');
+      await wait(800);
+      const afterLeave = await js('window.__petTest.memoSnapshot()');
+      push('鼠标移出窗口（穿透态）→ 自动关闭',
+        reopened.open === true && afterLeave.open === false,
+        `重开后 open=${reopened.open} → 收到"鼠标已离开窗口"通知后 open=${afterLeave.open}`);
+
       await js('window.__petTest.memoClear()');
       await js('window.__petTest.memoClose()');
       await wait(900); // 等窗口缩回、掩码重算完成，否则后面的交互测试会点到面板上
@@ -1171,9 +1209,9 @@ async function runInteractionTest() {
     if (spA.available && (spA.groups || []).includes('interact')) {
       await hoverOut();
       const outBase = await js('window.__petTest.state()');
-      // 摸头
+      // 摸头：立刻检查（交互组只有 3 帧 ≈360ms，等太久它会已经播完回待机 → 断言不稳定）
       win.webContents.send('pet:action', 'headpat');
-      await wait(300);
+      await wait(120);
       const afterPat = await js('window.__petTest.state()');
       push('右键摸头 → 播放「交互」动作组',
         afterPat.sprite.timeline && afterPat.sprite.timeline.group === 'interact'
@@ -1186,10 +1224,21 @@ async function runInteractionTest() {
       push('交互动作播完自动回待机',
         afterDone.sprite.timeline && afterDone.sprite.timeline.group === afterDone.sprite.baseGroup,
         `当前动作=${afterDone.sprite.timeline ? afterDone.sprite.timeline.group : 'null'} 待机=${afterDone.sprite.baseGroup}`);
-      // 喂白饭也走交互组（注意：鼠标要停在角色外，否则播完会停在 hover 而不是 idle）
+      // 顺带验证"读不到中间态"的补救：用逐帧采样确认 interact 确实播过
+      win.webContents.send('pet:action', 'headpat');
+      const seen = [];
+      for (let i = 0; i < 6; i++) {
+        await wait(80);
+        const s = await js('window.__petTest.state()');
+        seen.push(s.sprite.timeline ? s.sprite.timeline.group : '(停)');
+      }
+      push('逐帧采样确认摸头播放了「交互」组', seen.includes('interact'),
+        `80ms 间隔采样 6 次: ${seen.join(' → ')}`);
+      await wait(1200);
+      // 喂白饭也走交互组（同样要立刻检查）
       await hoverOut();
       win.webContents.send('pet:action', 'rice');
-      await wait(300);
+      await wait(120);
       const afterRice = await js('window.__petTest.state()');
       push('喂白饭 → 也播放「交互」动作组',
         afterRice.sprite.timeline && afterRice.sprite.timeline.group === 'interact',
