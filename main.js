@@ -440,6 +440,30 @@ async function runSelfCheck() {
     push('截图非空白', opaqueRatio > 0.02, `opaqueRatio=${opaqueRatio}`);
     push('无渲染错误', diag.errors.length === 0, `errors=${diag.errors.length}`);
 
+    // 窗口边框断言：四边 2px 内不许出现粉红边框色（调试红框 #ff3f6f 就是靠这个抓出来的）
+    {
+      const isPinkish = (i) => {
+        const bb = bitmap[i], gg = bitmap[i + 1], rr = bitmap[i + 2];
+        return rr > 200 && gg < 140 && bb > 60 && bb < 190;
+      };
+      let borderPink = 0, scanned = 0;
+      const scanEdge = (x0, y0, x1, y1) => {
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            if (x < 0 || y < 0 || x >= size.width || y >= size.height) continue;
+            scanned++;
+            if (isPinkish((y * size.width + x) * 4)) borderPink++;
+          }
+        }
+      };
+      scanEdge(0, 0, size.width - 1, 1);
+      scanEdge(0, size.height - 2, size.width - 1, size.height - 1);
+      scanEdge(0, 0, 1, size.height - 1);
+      scanEdge(size.width - 2, 0, size.width - 1, size.height - 1);
+      push('窗口没有边框（四边无粉红框线）', borderPink === 0,
+        `扫描 ${scanned} 个边缘像素，粉红边框色=${borderPink}（>0 说明调试红框或 CSS 边框漏出来了）`);
+    }
+
     // ---------- 鼠标穿透断言 ----------
     const cs = clickThrough.getState();
     const maskStats = cs.stats;
@@ -809,6 +833,31 @@ async function runBubbleProbe() {
 
     const verdict = lightPct > 20;
     log(`判定：${verdict ? 'PASS 气泡真的画在屏幕上了' : 'FAIL 屏幕上看不到气泡'}（近白占比 ${lightPct}%）`);
+
+    // 5) 边框取证：确认窗口四边没有被画出任何"边框线"（调试红框就是靠这个抓出来的）
+    const wx0 = Math.round((wb.x - display.bounds.x) * sf);
+    const wy0 = Math.round((wb.y - display.bounds.y) * sf);
+    const ww0 = Math.round(wb.width * sf);
+    const wh0 = Math.round(wb.height * sf);
+    const isPinkish = (i) => {
+      const b = bmp[i], g = bmp[i + 1], r = bmp[i + 2];
+      return r > 200 && g < 140 && b > 60 && b < 190;
+    };
+    let borderPink = 0, edgeTotal = 0;
+    const scan = (x0, y0, x1, y1) => {
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          if (x < 0 || y < 0 || x >= size.width || y >= size.height) continue;
+          edgeTotal++;
+          if (isPinkish((y * size.width + x) * 4)) borderPink++;
+        }
+      }
+    };
+    scan(wx0, wy0, wx0 + ww0 - 1, wy0 + 2);
+    scan(wx0, wy0 + wh0 - 3, wx0 + ww0 - 1, wy0 + wh0 - 1);
+    scan(wx0, wy0, wx0 + 2, wy0 + wh0 - 1);
+    scan(wx0 + ww0 - 3, wy0, wx0 + ww0 - 1, wy0 + wh0 - 1);
+    log(`窗口边框取证：扫描 ${edgeTotal} 个边缘像素，检出粉红边框色=${borderPink}（调试红框应为 0）`);
     log('截图：artifacts/screen-capture.png，气泡区域裁图：artifacts/screen-bubble-crop.png');
     app.__bubbleProbeDone = true;
     app.exit(verdict ? 0 : 2);
