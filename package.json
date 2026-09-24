@@ -13,7 +13,8 @@
     "assets:write": "node scripts/inspect-assets.js --write",
     "fixtures": "node scripts/make-test-assets.js",
     "probe:clickthrough": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probe-clickthrough.ps1",
-    "verify": "npm run autotest && npm run inspect"
+    "verify": "npm run autotest && npm run inspect",
+    "assets:list": "node scripts/list-assets.js"
   },
   "author": "",
   "license": "MIT",

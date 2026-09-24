@@ -168,9 +168,43 @@ function encodePNG(W, H, rgba) {
   ]);
 }
 
-// 判断一个 .png 是不是精灵图：必须存在同名 .json，且 json 里有 cols/rows/frameWidth/frameHeight
+// ---------- 判断"这是不是一张图"：看文件头，不看扩展名 ----------
+// 实际踩到的坑：主人放进来的文件叫 `xxx.jpg-lx2`，**扩展名不是 .png，内容却是真 PNG**
+// （从 Live2D / 游戏资源包里扒出来的常见命名）。只按扩展名筛会整批漏掉。
+const MAGIC = [
+  { name: 'png', bytes: [0x89, 0x50, 0x4e, 0x47] },
+  { name: 'jpeg', bytes: [0xff, 0xd8, 0xff] },
+  { name: 'gif', bytes: [0x47, 0x49, 0x46, 0x38] },
+  { name: 'webp', bytes: [0x52, 0x49, 0x46, 0x46] },
+  { name: 'bmp', bytes: [0x42, 0x4d] },
+];
+
+function sniffImageType(filePath) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(12);
+    const n = fs.readSync(fd, buf, 0, 12, 0);
+    if (n < 4) return null;
+    for (const m of MAGIC) {
+      if (m.bytes.every((b, i) => buf[i] === b)) {
+        if (m.name === 'webp' && buf.toString('ascii', 8, 12) !== 'WEBP') return null;
+        return m.name;
+      }
+    }
+    return null;
+  } catch { return null; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
+// 当前解码器只支持 8bit 非隔行 PNG
+function isUsableImage(filePath) {
+  return sniffImageType(filePath) === 'png';
+}
+
+// 判断一张图是不是精灵图：必须存在同名 .json（扩展名无关），且 json 里有 cols/rows/frameWidth/frameHeight
 function readSheetMeta(pngPath) {
-  const jsonPath = pngPath.replace(/\.png$/i, '.json');
+  const jsonPath = pngPath.replace(/\.[^.]+$/, '.json');
   if (!fs.existsSync(jsonPath)) return null;
   try {
     const meta = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
@@ -184,34 +218,40 @@ function loadGroups() {
   const groups = [];
   const loose = [];
 
-  // 扫描一个目录：先认"目录里的精灵图（png+json）"，再把散帧收成序列
+  // 扫描一个目录：先认"目录里的精灵图"，再把散帧收成序列、把单图收成"单帧素材"
+  // 注意：一律用文件头判断是不是图（不认扩展名）——实测有 `xxx.jpg-lx2` 其实是 PNG
   function scanDir(dir, label, depth) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const imageFiles = entries.filter((e) => e.isFile() && isUsableImage(path.join(dir, e.name))).map((e) => e.name);
 
-    // 1) 目录里的精灵图
-    for (const e of entries) {
-      if (e.isFile() && /\.png$/i.test(e.name)) {
-        const full = path.join(dir, e.name);
-        const sheet = readSheetMeta(full);
-        if (sheet) {
-          const base = e.name.replace(/\.png$/i, '');
-          groups.push({ name: label ? `${label}/${base}` : base, kind: 'spritesheet', file: full, jsonPath: sheet.jsonPath });
-        } else if (!label) {
-          loose.push(e.name); // 只在 assets 根目录提示孤立 PNG，避免噪音
-        }
+    // 1) 目录里带 json 描述的精灵图
+    const sheetFiles = new Set();
+    for (const name of imageFiles) {
+      const full = path.join(dir, name);
+      const sheet = readSheetMeta(full);
+      if (sheet) {
+        sheetFiles.add(name);
+        const base = name.replace(/\.[^.]+$/, '');
+        groups.push({ name: label ? `${label}/${base}` : base, kind: 'spritesheet', file: full, jsonPath: sheet.jsonPath });
       }
     }
 
-    // 2) 目录里的散帧序列（排除已识别为精灵图的 png）
-    const sheetNames = new Set(groups.filter((g) => g.dir === dir).map((g) => path.basename(g.file)));
-    const seqFiles = entries
-      .filter((e) => e.isFile() && /\.png$/i.test(e.name) && !sheetNames.has(e.name))
-      .filter((e) => !readSheetMeta(path.join(dir, e.name)))
-      .map((e) => e.name)
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    if (seqFiles.length && label) groups.push({ name: label, kind: 'sequence', dir, files: seqFiles });
+    const rest = imageFiles.filter((n) => !sheetFiles.has(n)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-    // 3) 子目录（最多两层；下划线开头的是内部测试夹具，build 是生成产物，都不参与运行时素材）
+    // 2) 目录里的散帧序列
+    if (label && rest.length > 1) {
+      groups.push({ name: label, kind: 'sequence', dir, files: rest });
+      rest.length = 0;
+    }
+
+    // 3) 剩下的单张图：作为"单帧素材"也要报告出来，而不是静默忽略
+    for (const name of rest) {
+      const base = name.replace(/\.[^.]+$/, '');
+      const full = path.join(dir, name);
+      groups.push({ name: label ? `${label}/${base}` : base, kind: 'single', file: full });
+    }
+
+    // 4) 子目录（最多两层；下划线开头是内部夹具，build 是生成产物）
     if (depth < 2) {
       for (const e of entries) {
         if (!e.isDirectory()) continue;
@@ -271,6 +311,22 @@ function inspectGroup(group, opts) {
         result.problems.push(`第 ${i} 帧 ${path.basename(f)} 解码失败: ${err.message}`);
       }
     }
+  }
+
+  // ---- 文件格式体检：内容真身 vs 扩展名 ----
+  // 实测教训：主人放进来的一批文件叫 `xxx.jpg-lx2`，**扩展名不是 .png 但内容是真 PNG**。
+  // 只按扩展名筛会整批漏掉；只按内容认又会让主人困惑，所以两边都报出来。
+  const sample = group.kind === 'sequence' ? path.join(group.dir, group.files[0])
+    : group.kind === 'spritesheet' ? group.file : group.file;
+  const realType = sniffImageType(sample);
+  const declaredExt = path.extname(sample).toLowerCase().replace('.', '');
+  result.format = { sample: path.basename(sample), realType, declaredExt };
+  if (realType && realType !== declaredExt) {
+    result.warnings.push(`内容真身是 ${realType.toUpperCase()}，但扩展名是 ".${declaredExt}"（或带后缀）`
+      + ' → 已按内容识别，不影响使用；若要让工具更省事可以改名');
+  }
+  if (group.kind === 'single') {
+    result.warnings.push('这是单张图（不是序列/精灵图）→ 只能当作一帧静态形象使用');
   }
 
   if (!result.frames.length) {
@@ -389,7 +445,8 @@ if (!fs.existsSync(ASSETS)) {
 }
 
 const loaded = loadGroups();
-const groups = loaded.groups.filter((g) => !only || g.name === only || g.name.split('/').includes(only));
+// 过滤器：既支持精确组名，也支持路径片段（例如只体检 assets\resources 下的东西）
+const groups = loaded.groups.filter((g) => !only || g.name === only || g.name.includes(only));
 if (loaded.loose.length) {
   console.log(`提示：assets\\ 下有 ${loaded.loose.length} 个孤立 PNG（没有同名 .json 描述，按单图忽略）：${loaded.loose.join(', ')}`);
   console.log('      若它们是精灵图，请补一份 <同名>.json：{"cols":4,"rows":2,"frameWidth":128,"frameHeight":128}');
@@ -403,8 +460,9 @@ if (!groups.length) {
 }
 
 let anyProblem = false;
+const KIND_LABEL = { sequence: '散帧序列', spritesheet: '精灵图', single: '单张图' };
 for (const g of groups) {
-  console.log(`\n===== 素材组「${g.name}」（${g.kind === 'sequence' ? '散帧序列' : '精灵图'}）=====`);
+  console.log(`\n===== 素材「${g.name}」（${KIND_LABEL[g.kind] || g.kind}）=====`);
   let r;
   try { r = inspectGroup(g, { write }); }
   catch (err) { console.log(`FAIL  无法解析: ${err.message}`); anyProblem = true; continue; }
