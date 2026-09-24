@@ -381,7 +381,10 @@ ipcMain.on('pet:set-panel', (_e, payload) => {
   let target;
   if (open) {
     const need = panelWinW;   // 由渲染层按素材宽高比回报（见 pet:set-content-ratio）
-    const h = PANEL_H; // 展开态固定高度（= 收起态设计高度），保证人物位置不变
+    // 高度**必须用设计高度 WIN_H**，不能用当前高度 b.height ——
+    // 未展开时的高度可能已被 DPI 吸附成 251，用它会让"展开"比"收起"高 1px，
+    // 从而把桌宠的屏幕 Y 推偏（实测偏移 5px）。主人明确要求过"人物位置不能动"。
+    const h = WIN_H;
     // 优先放右侧（窗口左边不动 → 桌宠位置完全不变）
     const spaceRight = work.x + work.width - (b.x + b.width);
     const spaceLeft = b.x - work.x;
@@ -783,6 +786,27 @@ async function runSelfCheck() {
         `实体占比=${maskOpenState.stats.maskCoverage} bbox=${JSON.stringify(maskOpenState.stats.maskBbox)}`);
 
       report.memo = { opened, withTasks, afterDone, full };
+
+      // ---------- 临时调速滑条（主人调好速度后会删掉，届时这段断言一起删） ----------
+      {
+        const s1 = await js('window.__petTest.setSpeed(1)');
+        const st1 = await js('window.__petTest.state()');
+        const s2 = await js('window.__petTest.setSpeed(3)');
+        const st2 = await js('window.__petTest.state()');
+        push('调速滑条存在且可用', s1.speed !== null && s2.speed !== null,
+          `1× → speed=${s1.speed}（滑块 ${s1.sliderValue}）；3× → speed=${s2.speed}（滑块 ${s2.sliderValue}）`);
+        push('速度倍率可改变帧延时', Math.abs(st1.sprite.speed - 1) < 0.01 && Math.abs(st2.sprite.speed - 3) < 0.01,
+          `state.speed ${st1.sprite.speed} → ${st2.sprite.speed}`);
+        // 有效延时 = 原始延时 / 倍率
+        const baseDelay = (st2.sprite.loadedDelays.idle || [])[0] || 120;
+        push('有效帧延时可推算（延时/倍率）',
+          Math.abs(baseDelay / st2.sprite.speed - baseDelay / 3) < 0.01,
+          `原始 ${baseDelay}ms ÷ ${st2.sprite.speed} = ${(baseDelay / st2.sprite.speed).toFixed(1)}ms/帧` +
+          `（1× 时 ${baseDelay}ms/帧，3× 时 ${(baseDelay / 3).toFixed(1)}ms/帧）`);
+        // 恢复默认 1.5×
+        const s3 = await js('window.__petTest.setSpeed(1.5)');
+        push('速度可恢复默认值', Math.abs(s3.speed - 1.5) < 0.01, `恢复为 ${s3.speed}×`);
+      }
 
       // ---------- 关闭方式（放在最后：关闭动作会隐藏面板，会干扰上面的测量） ----------
       // 1) 点面板内部 → 不应关闭
