@@ -577,6 +577,11 @@ async function runSelfCheck() {
       if (sp.available) {
         push('帧动画已启用', sp.placeholder === false && (sp.groups || []).length > 0 && sp.drewFrames > 0,
           `动作=[${(sp.groups || []).join(', ')}] 待机=${sp.baseGroup} 已绘制 ${sp.drewFrames} 帧`);
+        // 三个动作组各自独立可用（主人分配：待机 7/8/9、交互 1/5/6、靠近 J）
+        const need = ['idle', 'interact', 'hover'];
+        const missing = need.filter((n) => !(sp.groups || []).includes(n));
+        push('待机/交互/靠近 三组动作都已加载', missing.length === 0,
+          missing.length ? `缺少: ${missing.join(', ')}（现有: ${(sp.groups || []).join(', ')}）` : `三组齐全: ${need.join(', ')}`);
       } else {
         push('无素材时显示空位提示（保证可点可拖、穿透掩码有实体）',
           sp.placeholder === true && sp.drewFrames > 0,
@@ -1105,6 +1110,42 @@ async function runInteractionTest() {
   const b2 = trace('全部交互后');
   push('交互后窗口未跑位', Math.abs(b2.width - WIN_W) <= 6 && Math.abs(b2.height - WIN_H) <= 6 && win.isVisible(),
     `bounds=${b2.width}x${b2.height} visible=${win.isVisible()}`);
+
+  // ---------- 鼠标靠近（主人要求：点击被待办面板占用，所以靠近用鼠标移入触发） ----------
+  {
+    const hoverBefore = await js('window.__petTest.state()');
+    const spB = hoverBefore.sprite || {};
+    if (spB.available && (spB.groups || []).includes('hover')) {
+      const r = await js(`(() => {
+        const el = document.getElementById('sprite');
+        const b = el.getBoundingClientRect();
+        return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2),
+                 outX: 2, outY: 2 };
+      })()`);
+      // 先移出（确保从"离开"状态开始，避免初始化时鼠标恰好已在角色上导致基线不准）
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 2, clientY: 2 }))`);
+      await wait(300);
+      const out0 = await js('window.__petTest.state()');
+      // 再移入角色
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${r.x}, clientY: ${r.y} }))`);
+      await wait(250);
+      const inState = await js('window.__petTest.state()');
+      push('鼠标移入角色 → 切到「靠近」动作',
+        inState.sprite.hovering === true && inState.sprite.hoverEnters === out0.sprite.hoverEnters + 1
+        && inState.sprite.timeline && inState.sprite.timeline.group === 'hover',
+        `移出基线 enters=${out0.sprite.hoverEnters} → 移入后 ${inState.sprite.hoverEnters}；`
+        + `hovering=${inState.sprite.hovering} 当前动作=${inState.sprite.timeline ? inState.sprite.timeline.group : 'null'}`);
+      // 移出角色
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${r.outX}, clientY: ${r.outY} }))`);
+      await wait(400);
+      const outState = await js('window.__petTest.state()');
+      push('鼠标移出 → 回到待机动作',
+        outState.sprite.hovering === false && outState.sprite.timeline && outState.sprite.timeline.group === outState.sprite.baseGroup,
+        `hovering=${outState.sprite.hovering} 当前动作=${outState.sprite.timeline ? outState.sprite.timeline.group : 'null'} 待机=${outState.sprite.baseGroup} 离开次数 ${outState.sprite.hoverExits}`);
+    } else {
+      push('鼠标靠近动作可触发（当前无 hover 素材，跳过）', true, `现有动作: ${(spB.groups || []).join(', ') || '无'}`);
+    }
+  }
 
   const shot = path.join(ARTIFACTS, 'shot-interaction.png');
   fs.writeFileSync(shot, (await win.webContents.capturePage()).toPNG());

@@ -270,11 +270,11 @@ function loadGroups() {
 
     const rest = imageFiles.filter((n) => !sheetFiles.has(n)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-    // 2) 目录里的散帧序列
+    // 2) 目录里的散帧序列（**1 帧也算**：主人可能只用一张图做"鼠标靠近"这种动作）。
     //    ⚠️ 踩坑：这里必须 `files: rest.slice()`，不能直接传 `rest` 再 `rest.length = 0` ——
     //    后者清空的是**同一个数组对象**，组里的 files 会被一起清空（files[0] 变 undefined），
     //    症状是 "The path argument must be of type string. Received undefined"。
-    if (label && rest.length > 1) {
+    if (label && rest.length > 0) {
       groups.push({ name: label, kind: 'sequence', dir, files: rest.slice() });
       rest.length = 0;
     }
@@ -286,11 +286,15 @@ function loadGroups() {
       groups.push({ name: label ? `${label}/${base}` : base, kind: 'single', file: full });
     }
 
-    // 4) 子目录（最多两层；下划线开头是内部夹具，build 是生成产物）
+    // 4) 子目录（最多两层）。跳过：
+    //    - 下划线开头：内部测试夹具
+    //    - build：生成产物
+    //    - cutout：抠图成品（是"挑图的素材源"，不是动作组；否则 13 张会被当成一个大序列混进来）
+    const SKIP_DIRS = new Set(['build', 'cutout']);
     if (depth < 2) {
       for (const e of entries) {
         if (!e.isDirectory()) continue;
-        if (e.name.startsWith('_') || e.name === 'build') continue;
+        if (e.name.startsWith('_') || SKIP_DIRS.has(e.name)) continue;
         scanDir(path.join(dir, e.name), label ? `${label}/${e.name}` : e.name, depth + 1);
       }
     }
@@ -426,10 +430,11 @@ function inspectGroup(group, opts) {
     // 以"内容包围盒"对齐：每帧主体贴到画布中心（避免原图四周留白不一致导致抖动）
     const offX = f.bbox ? Math.round((canvasW - f.bbox.w) / 2 - f.bbox.minX) : 0;
     const offY = f.bbox ? Math.round((canvasH - f.bbox.h) / 2 - f.bbox.minY) : 0;
-    // 按主体高度统一时，每帧要额外缩放，让主体的高度都等于最高那一帧
-    const scale = (opts.normalizeHeight && f.bbox && bboxHs.length)
-      ? Math.max(...bboxHs) / f.bbox.h
-      : 1;
+    // 统一主体大小时，每帧缩放到 **全局目标高度**（opts.targetHeight）。
+    // ⚠️ 必须是"全局"而不是"组内最高那帧"：三组素材各自取组内最高会导致
+    //    idle 与 hover 的角色大小对不上，鼠标一靠近人物就突然变大/变小。
+    const target = opts.targetHeight || (bboxHs.length ? Math.max(...bboxHs) : 0);
+    const scale = (opts.normalizeHeight && f.bbox && target) ? target / f.bbox.h : 1;
     return { index: f.index, file: f.file, offsetX: offX, offsetY: offY, scale: +scale.toFixed(4) };
   });
 
@@ -530,10 +535,30 @@ if (!groups.length) {
 
 let anyProblem = false;
 const KIND_LABEL = { sequence: '散帧序列', spritesheet: '精灵图', single: '单张图' };
+
+// 预扫：为了"跨动作组统一角色大小"，先量出每组主体的高度范围，算出全局目标高度。
+// 不做这一步的话，idle（主体高 1401）与 hover（主体高 1099）会各自按组内最高帧缩放，
+// 结果鼠标一靠近，人物突然变大/变小。
+let globalTargetHeight = 0;
+if (normalizeHeight) {
+  const heights = [];
+  for (const g of groups) {
+    try {
+      const r = inspectGroup(g, { write: false, normalizeHeight: false });
+      for (const f of r.frames) if (f.bbox) heights.push(f.bbox.h);
+    } catch { /* 解析失败的组跳过 */ }
+  }
+  if (heights.length) {
+    globalTargetHeight = Math.round(Math.max(...heights) * 0.85);
+    console.log(`跨组统一：主体高度 ${Math.min(...heights)}~${Math.max(...heights)}px → 统一到 ${globalTargetHeight}px`
+      + `（取最高帧的 85%，给取景差异留余地）\n`);
+  }
+}
+
 for (const g of groups) {
   console.log(`\n===== 素材「${g.name}」（${KIND_LABEL[g.kind] || g.kind}）=====`);
   let r;
-  try { r = inspectGroup(g, { write, normalizeHeight }); }
+  try { r = inspectGroup(g, { write, normalizeHeight, targetHeight: globalTargetHeight }); }
   catch (err) { console.log(`FAIL  无法解析: ${err.message}\n${err.stack}`); anyProblem = true; continue; }
 
   console.log(`帧数: ${r.frames.length}`);

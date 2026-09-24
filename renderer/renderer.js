@@ -300,6 +300,38 @@
   window.addEventListener('mousemove', (e) => reportHit(e.clientX, e.clientY));
   window.addEventListener('mouseleave', () => {
     if (lastHit !== false) { lastHit = false; window.pet.pointerHit(false); }
+    if (hoverState.active) setHover(false);
+  });
+
+  // ---------- 鼠标靠近 ----------
+  // 主人明确说"点击功能已经被占用"（左键=待办面板），所以"靠近"用**鼠标移入角色矩形**触发：
+  //   进入 → 若 assets/hover 有素材就播一次（1 帧素材就是"停在这一帧"）
+  //   离开 → 回待机
+  // 用矩形判定即可（角色就是矩形的），不必做逐像素 alpha 判定。
+  function setHover(on) {
+    if (on === hoverState.active) return;
+    hoverState.active = on;
+    spriteState.hovering = on;
+    if (on) hoverState.enters++; else hoverState.exits++;
+    if (!spriteState.available) { dlog('hover', `靠近=${on}（无素材，忽略）`); return; }
+    if (on) {
+      if (spriteGroups.hover) {
+        // 一次性播完 → onEnd 里会判断"鼠标还在不在"决定停在 hover 还是回 idle
+        playGroup('hover', { loop: false, force: true, onEnd: () => backToIdle('hover 播完') });
+      } else {
+        dlog('hover', '靠近了，但没有 hover 素材，保持待机');
+      }
+    } else {
+      const base = spriteState.baseGroup;
+      if (spriteGroups[base]) playGroup(base, { loop: true, force: true });
+    }
+  }
+
+  window.addEventListener('mousemove', (e) => {
+    if (!spriteState.available) return;
+    const r = pet.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    setHover(inside);
   });
 
   // ---------- 手动拖动 ----------
@@ -399,11 +431,18 @@
   let CW = canvas ? canvas.width : 130;
   let CH = canvas ? canvas.height : 130;
   const spriteGroups = {};
+  // 动作时间线。onEnd 回调就是"状态机"：
+  //   idle → hold（一直循环）
+  //   一次性动作（interact 交互 / hover 靠近）→ 到 idle（若鼠标还在角色上则停在 hover）
+  const spriteTimeline = { name: null, loop: true, onEnd: null };
   const spriteState = {
     available: false, reason: '未加载', groups: [], baseGroup: null,
-    activeGroup: null, activeFrame: 0, drewFrames: 0, placeholder: false,
+    activeGroup: null, activeFrame: 0, drewFrames: 0, placeholder: false, hovering: false,
   };
   const PRIORITY = { pet: 3, angry: 2, happy: 1, idle: 0 };
+  // 鼠标靠近状态（放在前面声明：mousemove 处理器在初始化阶段就可能调用 setHover，
+  // 而 setHover 在下面才定义；用 const 声明在后面会踩 TDZ 的坑）
+  const hoverState = { active: false, enters: 0, exits: 0 };
 
   // 空位提示：没有素材时画一个中性的"占位环"，保证桌宠仍然可见、可点、可拖、
   // 穿透掩码也有实体可依（否则整个窗口都是空气，鼠标事件根本进不来）。
@@ -470,48 +509,73 @@
     return true;
   }
 
-  let spriteTimeline = null;
-  function playGroup(name, { loop = true, force = false } = {}) {
+  let lastAdvance = 0;
+  // 切到某个动作。onEnd 决定"播完之后去哪"，默认回待机。
+  function playGroup(name, { loop = true, force = false, onEnd = null } = {}) {
     const g = spriteGroups[name];
     if (!g || !g.images.length) return false;
-    const curPrio = spriteTimeline ? (PRIORITY[spriteTimeline.group] ?? 0) : -1;
-    const newPrio = PRIORITY[name] ?? 0;
-    if (!force && spriteTimeline && !spriteTimeline.finished && newPrio < curPrio) {
-      dlog('sprite-play', `忽略「${name}」(优先级 ${newPrio})，正在播「${spriteTimeline.group}」(优先级 ${curPrio})`);
+    const curPrio = spriteTimeline.name ? (PRIORITY[spriteTimeline.name] ?? 5) : -1;
+    const newPrio = PRIORITY[name] ?? 5;
+    if (!force && spriteTimeline.name && newPrio < curPrio) {
+      dlog('sprite-play', `忽略「${name}」(优先级 ${newPrio})，正在播「${spriteTimeline.name}」(优先级 ${curPrio})`);
       return false;
     }
-    spriteTimeline = { group: name, loop, finished: false };
+    spriteTimeline.name = name;
+    spriteTimeline.loop = loop;
+    spriteTimeline.onEnd = onEnd;
+    lastAdvance = performance.now();
     drawSpriteFrame(name, 0);
     dlog('sprite-play', `播放动作「${name}」loop=${loop} 优先级=${newPrio} 帧数=${g.images.length}`);
     return true;
   }
+
+  // 回到待机；若鼠标还停在角色上，就停在"靠近"动作的最后一帧
+  function backToIdle(reason) {
+    if (spriteState.hovering && spriteGroups.hover) {
+      const g = spriteGroups.hover;
+      spriteTimeline.name = 'hover';
+      spriteTimeline.loop = false;
+      spriteTimeline.onEnd = null;
+      drawSpriteFrame('hover', g.images.length - 1);
+      dlog('sprite-play', `${reason} → 停在「hover」最后一帧（鼠标仍在角色上）`);
+      return;
+    }
+    const base = spriteState.baseGroup;
+    if (spriteGroups[base]) playGroup(base, { loop: true, force: true });
+  }
+
   function playAction(primary, aliases = []) {
-    for (const n of [primary, ...aliases]) if (spriteGroups[n]) return playGroup(n, { loop: false });
+    for (const n of [primary, ...aliases]) {
+      if (spriteGroups[n]) return playGroup(n, { loop: false, force: true, onEnd: () => backToIdle(`「${n}」播完`) });
+    }
     return false;
   }
 
-  let lastAdvance = 0;
   function tick(ts) {
-    if (spriteTimeline) {
-      const g = spriteGroups[spriteTimeline.group];
+    if (!spriteState.available) {
+      drawPlaceholder(ts); // 空位提示（呼吸式脉动）
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (spriteTimeline.name) {
+      const g = spriteGroups[spriteTimeline.name];
       if (g && ts - lastAdvance >= (g.delays[spriteState.activeFrame] || 120)) {
         lastAdvance = ts;
         const next = spriteState.activeFrame + 1;
         if (next >= g.images.length) {
           if (spriteTimeline.loop) {
-            drawSpriteFrame(spriteTimeline.group, 0);
+            drawSpriteFrame(spriteTimeline.name, 0);
           } else {
-            spriteTimeline.finished = true;
-            const back = spriteState.baseGroup;
-            spriteTimeline = null;
-            if (spriteGroups[back]) playGroup(back, { loop: true, force: true });
+            const cb = spriteTimeline.onEnd;
+            spriteTimeline.name = null;
+            spriteTimeline.onEnd = null;
+            if (typeof cb === 'function') cb();
+            else backToIdle('一次动作播完');
           }
         } else {
-          drawSpriteFrame(spriteTimeline.group, next);
+          drawSpriteFrame(spriteTimeline.name, next);
         }
       }
-    } else if (!spriteState.available) {
-      drawPlaceholder(ts); // 待机空位提示（呼吸式脉动）
     }
     requestAnimationFrame(tick);
   }
@@ -778,7 +842,10 @@
         drewFrames: spriteState.drewFrames,
         canvasSize: CW + 'x' + CH,
         display: spriteState.display || null,
-        timeline: spriteTimeline ? { group: spriteTimeline.group, loop: spriteTimeline.loop } : null,
+        timeline: spriteTimeline.name ? { group: spriteTimeline.name, loop: spriteTimeline.loop } : null,
+        hovering: spriteState.hovering,
+        hoverEnters: hoverState.enters,
+        hoverExits: hoverState.exits,
       },
     }),
   };
