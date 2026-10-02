@@ -48,7 +48,42 @@ npm run assets:write    # 体检 + 生成对齐帧和清单
 npm start               # 启动桌宠，会自动读取清单并播放帧动画
 ```
 
-`npm run assets:write` 会产出：
+### ⚠️ 加/换素材时必须**按组单独跑**（踩过的坑）
+
+根目录那 13 张挑图用的 PNG（`assets\1.png` … `assets\Q.png`）会被扫描器当成
+**13 个"单张图"动作组**，一起写进 `manifest.json`（人家实测过：跑完清单里多出
+`1/2/…/10/J/K/Q` 这些组，还会给每组生成 `build\frames\<组名>\`）。
+
+所以正确姿势是带上组名：
+
+```powershell
+node scripts\inspect-assets.js --write --normalize-height idle
+node scripts\inspect-assets.js --write --normalize-height interact
+node scripts\inspect-assets.js --write --normalize-height hover
+node scripts\inspect-assets.js --write --normalize-height happy
+```
+
+**`--normalize-height` 不能省**：它把一组里的主体统一缩放到"该组最高帧的 85%"。
+少了它，`idle` 三帧主体高度差 1.99 倍，播放时会**忽大忽小**；
+而且它决定"屏上角色多大"——现在的四组都落在 127~145px，是一致的。
+
+### 🧽 素材里有"页面残留"怎么办（书页照片素材常见）
+
+这套图是从**书页照片**上裁的，所以画面里会混进页面自己的东西（主人 2026-09-24 反馈"待机动画下方有白线、右下有白线框"）：
+
+```powershell
+node scripts\clean-pagemarks.js            # 体检：列出每块残留的判据与结论（不写文件）
+node scripts\clean-pagemarks.js --write    # 真的清掉（原图被覆盖，git 里可回滚）
+```
+
+它会清掉：页面边框的**灰色横线**、右下角的**粉色页码徽标**（圆角框 + 数字 + 水滴）、
+左上角的淡粉圆弧、边角的灰色小印子。
+
+⚠️ 它**不会**碰"白叶子"那类装饰 —— 那种叶子的叶肉偏白，抠背景时被吃掉了，
+只剩深色轮廓，看着也像"淡色的东西"，但**它是画的一部分**。
+判据靠的不是"淡不淡"，而是**形状**：线稿的填充率只有 0.01~0.18，叶子这类紧凑色块 ≥ 0.30。
+
+`--write` 会产出：
 
 ```
 assets\manifest.json                    ← 运行时读这份（可容纳多个动作组）

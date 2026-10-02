@@ -447,6 +447,10 @@ function inspectGroup(group, opts) {
     // 产物统一放 assets/build/frames/<组名>/，既不会污染素材组，也不会被扫描器当成新素材
     const safeName = group.name.replace(/[\\/]/g, '__');
     const framesDir = path.join(ASSETS, 'build', 'frames', safeName);
+    // ⚠️ 必须先清空这个目录再写：帧数变少时（比如 3 帧的动作换成 1 张定格图），
+    //    旧的 frame-001/frame-002 会留在磁盘上。虽然清单里不引用它们（不影响播放），
+    //    但目录看着像"还有 3 帧"，而且会被一起打进便携包。踩过一次，这里直接清干净。
+    if (fs.existsSync(framesDir)) fs.rmSync(framesDir, { recursive: true, force: true });
     fs.mkdirSync(framesDir, { recursive: true });
     const written = [];
     for (const f of result.frames) {

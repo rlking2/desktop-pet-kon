@@ -1,6 +1,26 @@
-﻿assets\idle\     待机动画（角色一直循环播）    ← 放主人选的图
-assets\interact\ 交互动画（点击/摸头时播一次）  ← 放主人选的图
-assets\hover\    鼠标靠近动画（移上去时播）    ← 放主人选的图
+assets\idle\     待机动画（角色一直循环播）    ← 现在 = 1 张定格图（主人挑的姿势，已"只留人物"）
+assets\interact\ 交互动画（点击/摸头时播一次）  ← 3 帧，带彩纸
+assets\hover\    鼠标靠近动画（移上去时播）    ← 1 张，已"只留人物"
+                 （**白色那片叶子留着**，它压在脸上；右边那只绿耳环也留着 —— 它被手臂挡开，
+                   是独立连通块，清的时候要用 keep-character-only 的 --keep 保护）
+assets\happy\    开心（右键菜单「开心」）      ← 3 帧动画（带彩纸），点一次保持住、再点一次退出
 assets\cutout\   13 张抠好的成品（挑图用，不参与播放）
 
 放好后跑：npm run assets:write
+
+⚠️ 每次加/换图都要**按组单独跑**（否则根目录那 13 张 PNG 会被当成动作组混进 manifest）：
+
+  node scripts\inspect-assets.js --write --normalize-height idle
+  node scripts\inspect-assets.js --write --normalize-height interact
+  node scripts\inspect-assets.js --write --normalize-height hover
+  node scripts\inspect-assets.js --write --normalize-height happy
+
+--normalize-height 是必须的：它把每组主体统一到"该组最高帧的 85%"，
+屏上所有动作组的角色高度才对得上（现在四组都是 169px，不会忽大忽小）。
+
+素材脏了怎么办（书页照片素材常见）：
+  node scripts\clean-pagemarks.js        # 体检"页面残留"（页码徽标/边框线/圆弧）
+  node scripts\clean-pagemarks.js --write
+  node scripts\keep-character-only.js    # 体检"除人物外的彩色斑块"（彩纸/叶子/花瓣）
+  node scripts\keep-character-only.js --write [组名] [--keep=x,y]   # --keep 保护独立部件（耳环）
+  node scripts\erase-color-blobs.js --file=<png> --key=R,G,B,容差 --seed=x,y   # 清"压在人物身上"的斑块
