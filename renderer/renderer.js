@@ -46,19 +46,56 @@
     dlog('mousemove', `client=(${Math.round(e.clientX)},${Math.round(e.clientY)}) target=${describeTarget(e.target)}`);
   }, true);
 
-  // ---------- 台词（中性，与主题无关；以后可由素材包或配置覆盖） ----------
+  // ---------- 台词（中性，与主题无关） ----------
+  // ⚠️ 第 32 轮起这里是**离线兜底**，不再是唯一来源：
+  //   接上 API 时「开心开 / 开心关 / 生气 / 空闲开口」这四种台词由主进程决定（可能来自大模型），
+  //   渲染层调 `window.pet.actionLine({action})` 拿结果。摸头**永远是本地这几句**（主人明确要求）。
+  //   真值表在 lib/action-lines.js —— 那里是权威，这里这份只是它的一份投影（保持一致，别手改）。
   const LINES = {
     click: ['戳人家干嘛啦。', '在的在的。', '人家醒着呢。', '今日状态：还行。'],
     pat: ['唔……别摸啦。', '就、就一下哦。', '（眯眼）'],
     angry: ['哼！不理你了。', '再说人家就罢工了！', '（鼓起来）'],
     happy: ['嘿嘿～今天也很开心！', '人家心情超好！', '（尾巴摇摇）'],
     happyOff: ['好啦，人家不闹了～', '（恢复平时的样子）'],
+    idle: ['（人家在这儿哦）', '主人在忙吗？', '白饭……想吃白饭……', '（尾巴轻轻晃了晃）'],
   };
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+  // ---------- 台词来源（第 32 轮） ----------
+  // 「等模型说完再开口」（主人 2026-10-02 定的）：动画**立刻**播，台词等主进程那一趟回来再显示。
+  //   - 没配 API / 关掉对话 / 对应时机没开 → 主进程立刻回本地台词，主人感觉不到延迟；
+  //   - 真的走模型 → 会有 1～3 秒静默，这段时间她只做动作不出声（这就是主人要的"等模型说完再开口"）。
+  // 迟到保护：连点两下「开心」时，第一趟的回复回来不许再说话（否则先"开心"后"收起"会串台）。
+  let lineReqSeq = 0;
+  function localLine(action) {
+    const arr = LINES[action] || LINES.click;
+    return pick(arr);
+  }
+  async function requestLine(action, why) {
+    const seq = ++lineReqSeq;
+    try {
+      const res = await window.pet.actionLine({ action });
+      if (seq !== lineReqSeq) {
+        dlog('line', `台词迟到了，丢弃（${action}：第 ${seq} 趟，最新是第 ${lineReqSeq} 趟）`);
+        return null;
+      }
+      const text = (res && res.text) || localLine(action);
+      say(text);
+      dlog('line', `台词(${action}) 来源=${res && res.source} 原因=${res && res.reason}${res && res.ms ? ` ${res.ms}ms` : ''}：${text}`);
+      return text;
+    } catch (err) {
+      // 主进程那条路整个挂了也不能哑巴：退回本地那句（气泡里永远不出现技术错误）
+      if (seq === lineReqSeq) { say(localLine(action)); dlog('line', `actionLine 抛错，退回本地台词：${err && err.message}`); }
+      return null;
+    }
+  }
+
 
   // ---------- 气泡 ----------
   let bubbleTimer = null;
   let sayCount = 0;
+  let lastSay = '';      // 最近一次真的显示出来的台词（自检断言"说对了没有"用，比读气泡更直接）
+  let lastSayAt = 0;
   let audioCtx = null;
   function chirp(freq = 880) {
     try {
@@ -82,6 +119,8 @@
   }
   function say(text, ms) {
     sayCount++;
+    lastSay = String(text == null ? '' : text);
+    lastSayAt = Date.now();
     bubble.textContent = text;
     bubble.classList.add('show');
     chirp();
@@ -342,7 +381,12 @@
     return true;
   }
 
-  function toggleMemo() { return memoState.open ? closeMemo() : openMemo(); }
+  function toggleMemo() {
+    // 开面板 = 主人理她了：通知主进程把"空闲计时"归零（第 32 轮）。
+    // 不做的话，面板开着的时候她可能自己冒出来"主动搭话"，跟主人正在输入框打字撞在一起。
+    try { window.pet.userActive('memo-toggle'); } catch { /* 通知失败不影响面板 */ }
+    return memoState.open ? closeMemo() : openMemo();
+  }
 
   if (memoInput) {
     memoInput.addEventListener('keydown', (e) => {
@@ -709,12 +753,12 @@
       if (poseHold.group === 'happy') {
         poseHold.group = null;
         reportPose();
-        say(pick(LINES.happyOff), 1800);
+        requestLine('happyOff', '再点一次「开心」');   // 台词等模型（或本地兜底），动画不等
         dlog('action', '再点一次「开心」→ 退出保持动作，回待机');
         backToIdle('主人又点了一次「开心」');
         return;
       }
-      say(pick(LINES.happy));
+      requestLine('happy', '点上「开心」');             // 同上：先动起来，话随后到
       const g = spriteGroups.happy;
       if (g) {
         // loop=true 就是"保持"：单帧素材循环 = 定格住，多帧素材循环 = 一直播
@@ -733,7 +777,7 @@
       return;
     }
     if (name === 'angry') {
-      say(pick(LINES.angry));
+      requestLine('angry', '菜单点了「生气」');   // 同样等模型；没配 API 就是本地那句
       if (!playAction(INTERACT_GROUP, ['angry'])) playAnim('angry', 1300);
       else dlog('action', `已播放「${INTERACT_GROUP}」交互动作组`);
       return;
@@ -1243,9 +1287,13 @@
   window.__petTest = {
     click: () => pet.click(),
     action: (n) => {
-      if (n === 'headpat') { say(pick(LINES.pat)); playAnim('pat', 720); }
-      if (n === 'happy') { say(pick(LINES.happy)); playAnim('hop', 520); }
-      if (n === 'angry') { say(pick(LINES.angry)); playAnim('angry', 1300); }
+      // 第 32 轮：这里改成走**和真实菜单完全同一条路**（requestLine → 主进程判定）。
+      // 以前它直接念本地台词，于是自检永远看不到"接 API 后走模型"那条路 —— 那正是最该被盯住的路。
+      if (n === 'headpat') { say(pick(LINES.pat)); playAnim('pat', 720); return Promise.resolve(pick(LINES.pat)); }
+      if (n === 'happy') { playAnim('hop', 520); return requestLine('happy', '__petTest'); }
+      if (n === 'happyOff') { return requestLine('happyOff', '__petTest'); }
+      if (n === 'angry') { playAnim('angry', 1300); return requestLine('angry', '__petTest'); }
+      return Promise.resolve(null);
     },
     // 描边调试入口 setOutline 已按主人要求删除（数值固化在 renderer.js 的 OUTLINE 里）
     probeHit: (x, y) => {
@@ -1466,6 +1514,7 @@
       bubbleInViewport: (() => { const r = bubble.getBoundingClientRect();
         return r.top >= 0 && r.left >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight; })(),
       lastHit, clickCount, sayCount, dragging,
+      lastSay, lastSayAt, lineSeq: lineReqSeq,
       contextMenuCount: window.__petContextMenuCount || 0,
       rightDiag: { ...rightDiag },
       scopeClass: pet.className,

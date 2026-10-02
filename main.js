@@ -8,6 +8,7 @@ const { loadAnimationManifest } = require('./lib/assets');
 // API 设置 + 对话：都只在主进程用（密钥绝不发给渲染层，理由见 lib/api-config.js 顶部注释）
 const apiConfig = require('./lib/api-config');
 const chatApi = require('./lib/chat');
+const actionLines = require('./lib/action-lines');
 
 const ROOT = __dirname;
 const ARTIFACTS = path.join(ROOT, 'artifacts');
@@ -333,7 +334,12 @@ function buildMenuTemplate() {
     { type: 'separator' },
     // 「设置…」= 接入 API 的入口（填 Base URL / 模型 / 密钥）。
     // 独立窗口，不是塞进桌宠那个透明窗口：表单需要正常的尺寸和焦点。
-    { label: '设置…（接入 API）', click: () => openSettingsWindow('menu') },
+    //
+    // 「安静一会儿」= 一键静音空闲主动开口（第 32 轮）。为什么是**复选框**而不是一次性动作：
+    //   主人嫌吵的时候要能一眼看出"现在是静音着的"，再点一下就是恢复 —— 否则他会以为她坏了。
+    //   注意它只静音**主动开口**，主人自己打字聊天不受影响。
+    { label: '安静一会儿（不要主动开口）', type: 'checkbox', checked: !!apiConfig.load().muted, click: () => toggleMute(undefined, 'menu') },
+    { label: '设置…（接入 API / 她的话）', click: () => openSettingsWindow('menu') },
     { type: 'separator' },
     { label: '回到底部右侧', click: () => {
         const work = screen.getPrimaryDisplay().workArea;
@@ -1378,15 +1384,22 @@ async function runInteractionTest() {
   const tpl = buildMenuTemplate();
   const labels = tpl.filter((i) => i.label).map((i) => i.label);
   const hasLabel = (s) => labels.some((l) => l.includes(s));
-  push('菜单项符合本轮设计（开心 / 摸头 / 设置 / 回到底部右侧 / 开发者工具 / 退出）',
-    labels.length === 7 && hasLabel('开心') && hasLabel('摸头') && hasLabel('设置')
+  push('菜单项符合本轮设计（开心 / 摸头 / 安静一会儿 / 设置 / 回到底部右侧 / 开发者工具 / 退出）',
+    labels.length === 8 && hasLabel('开心') && hasLabel('摸头') && hasLabel('安静一会儿') && hasLabel('设置')
     && hasLabel('回到底部右侧') && hasLabel('开发者工具') && hasLabel('退出'),
     `共 ${labels.length} 项: ${labels.join(' / ')}`);
   push('已下架的菜单项不再出现（永远置顶 / 喂白饭 / 让她说句话）',
     !hasLabel('永远置顶') && !hasLabel('喂白饭') && !hasLabel('让她说句话'),
     `模板里没有这三项 → ${labels.join(' / ')}`);
   const clickables = tpl.filter((i) => typeof i.click === 'function').length;
-  push('菜单项都绑定了动作', clickables === 6, `可点击项 ${clickables}（标题项之外全都要有 click）`);
+  // 「有标题、但不可点」的项 = 标题项（enabled:false）。分隔线没标题，不参与。
+  const titleItems = tpl.filter((i) => i.label && i.enabled === false).length;
+  // ⚠️ 第 32 轮加了「安静一会儿」→ 原来那句 `clickables === 6` 必须跟着动。
+  //    这就是"改设计要改断言"：留旧数字会红，改成 `>= 6` 又会丢掉"漏绑一个动作"的检测力，
+  //    所以改成按菜单结构算（每个非标题的带标签项都必须绑到函数）。
+  const unbound = tpl.filter((i) => i.label && i.enabled !== false && typeof i.click !== 'function').map((i) => i.label);
+  push('菜单项都绑定了动作', unbound.length === 0 && clickables === labels.length - titleItems,
+    `可点击项 ${clickables} = 带标题项 ${labels.length} − 标题项 ${titleItems}；没绑动作的=${unbound.length ? unbound.join('/') : '无'}`);
 
   // 兜底入口：Ctrl+M（不依赖鼠标，万一物理右键进不来也有办法开菜单）
   // 注意：面板打开时输入框会接收键盘输入并 stopPropagation（避免打字误触全局快捷键），
@@ -1894,6 +1907,239 @@ async function runInteractionTest() {
     }
   }
 
+  // ---------- 她的话（第 32 轮）：动作走模型 / 人格可调 / 空闲开口限频 ----------
+  // 这一组同样**一条真实 API 调用都没有**：走模型那条路靠配置里的 mockReply 旁路
+  // （同样跑完 chat() 的整条链路，只是不发网络请求 —— 见 lib/api-config.js 的注释）。
+  {
+    const cfgPath = apiConfig.getConfigPath();
+    const realCfg = apiConfig.load();
+    // ⚠️ 配置文件**可能还不存在**：只调 load() 不会创建它（只有 save() 才落盘）。
+    //    第一版这里直接 readFileSync → 全新环境 / 隔离的自检目录上必崩（自检当场抓到）。
+    //    所以：读不到就当它"本来就是空的"，收尾时把"不存在"这个事实也还原回去。
+    let originalCfgText = null;
+    try { originalCfgText = fs.readFileSync(cfgPath, 'utf8'); } catch { originalCfgText = null; }
+    const restoreCfg = () => {
+      if (originalCfgText === null) { try { fs.rmSync(cfgPath, { force: true }); } catch { /* 忽略 */ } }
+      else fs.writeFileSync(cfgPath, originalCfgText, 'utf8');
+      apiConfig.reloadCache();   // ★ 必须重读磁盘：load() 有缓存，save({}) 只会把旧缓存写回去
+    };
+    // 纯函数直接用 lib/action-lines.js 的实现（**不复制一份**：复制出来的副本会漂移，
+    // 那样断言测的就是副本而不是真货 —— 这是"断言必须钉住真实现"的老规矩）
+    const personaIsEmpty = actionLines.personaIsEmpty;
+    const buildSystemPrompt = actionLines.buildSystemPrompt;
+    const apiLinesDebugPrompt = (action) => {
+      const c = apiConfig.load();
+      return {
+        system: actionLines.buildSystemPrompt({ persona: c.persona, legacyPrompt: c.systemPrompt, action }),
+        messages: actionLines.buildActionMessages({ persona: c.persona, legacyPrompt: c.systemPrompt, action }),
+      };
+    };
+    // 空闲状态的注入与观测：**直接调主进程里那份实现**（`pet:idle-state` 的处理器只是把它包了一层）。
+    // 为什么不去绕 ipcMain 的内部结构：那是 Electron 私有字段，升级就可能改名 —— 那种依赖比不测还糟。
+    // 通道本身的存在性由 app 启动时的 ipcMain.handle 注册保证（注册失败会立刻抛错）。
+    const idleStateInject = (payload) => Promise.resolve(idleStateForTest(payload || {}));
+    const writeCfg = (extra) => {
+      // ★ 每次都从**磁盘当前值**出发，不能从块开头那份快照展开：
+      //   否则中间设的密钥/人格会被后一次覆盖回旧值（第 32 轮实测：多条断言因此连环红，
+      //   症状是 api_not_ready —— 看着像"新逻辑没生效"，实际是测试自己把配置抹掉了）。
+      const cur = apiConfig.reloadCache();
+      const merged = { ...cur, ...extra, persona: { ...cur.persona, ...((extra && extra.persona) || {}) } };
+      const norm = apiConfig.normalize(merged);
+      fs.writeFileSync(cfgPath, JSON.stringify(norm, null, 2), 'utf8');
+      apiConfig.reloadCache();   // ★ load() 有缓存：只有重读磁盘，写进去的测试配置才真的生效
+      return apiConfig.load();
+    };
+    try {
+      // (a) 设置窗口里的新面板要真的长出来 —— 这里量的是**主进程最终拼出来的提示词**
+      push('人格（五项）会进 system 提示词，气泡硬约束也跟着进',
+        personaIsEmpty({}) === true
+        && buildSystemPrompt({ persona: { identity: 'SELFTEST_IDENTITY_MARK', style: 'STYLE_MARK' } }).includes('SELFTEST_IDENTITY_MARK')
+        && buildSystemPrompt({ persona: {}, action: 'idle' }).includes('主人已经有一阵子没跟你说话了')
+        && buildSystemPrompt({ persona: {} }).includes('40 个字以内'),
+        '空人格=用内置默认；四项人格与时机提示、40 字硬约束都进得了提示词');
+
+      // (b) 设置窗口：新面板与字段真的铺开了吗（第 32 轮新增）
+      try {
+        const sw = openSettingsWindow('selftest-words');
+        await new Promise((r) => sw.webContents.once('did-finish-load', r));
+        await wait(1200);
+        const form = await sw.webContents.executeJavaScript(`(() => {
+          const ta = (k) => document.getElementById('persona-' + k);
+          return {
+            personaFields: ['identity', 'style', 'quirks', 'taboos', 'examples'].filter((k) => !!ta(k)),
+            presets: document.querySelectorAll('#personaPresets button').length,
+            placeholder: ta('identity') ? ta('identity').placeholder.length : 0,
+            actionToggles: ['happy', 'happyOff', 'angry', 'idle'].filter((a) => !!document.querySelector('#actionToggles input[data-action="' + a + '"]')),
+            idleUI: !!(document.getElementById('idleMinutes') && document.getElementById('idlePerDay')
+              && document.getElementById('quietFrom') && document.getElementById('quietTo')
+              && document.getElementById('idleEnabled') && document.getElementById('muted')),
+            quietOptions: (document.getElementById('quietFrom') || { options: [] }).options.length,
+            tryBtn: !!document.getElementById('tryLine'),
+            promptBtn: !!document.getElementById('previewPrompt'),
+            scrollH: Math.round(document.body.scrollHeight), viewH: Math.round(innerHeight),
+          };
+        })()`);
+        fs.writeFileSync(path.join(ARTIFACTS, 'shot-settings.png'), (await sw.webContents.capturePage()).toPNG());
+        push('设置窗口：人格与「她的话」面板真的长出来了',
+          form.personaFields.length === 5 && form.presets >= 6 && form.placeholder > 10
+          && form.actionToggles.length === 4 && form.idleUI === true && form.quietOptions === 24
+          && form.tryBtn === true && form.promptBtn === true,
+          `人格字段=${form.personaFields.join('/')} 预设=${form.presets} 个 占位符=${form.placeholder} 字`
+          + ` 时机开关=${form.actionToggles.join('/')} 静音时段选项=${form.quietOptions} 个`
+          + ` 试一句=${form.tryBtn} 看提示词=${form.promptBtn} 内容高=${form.scrollH}/视口=${form.viewH}`);
+        // ※ 这里**不**断言"不用滚动"：加了两个面板之后内容本来就比视口高，滚动是预期行为。
+        //   上一轮那条 fitsNoScroll 断言用的是紧凑排版，已经随本轮改动作废（见 devlog 的"改设计要改断言"）。
+        sw.destroy();
+        await wait(300);
+      } catch (err) {
+        push('设置窗口：人格与「她的话」面板真的长出来了', false, '打开失败: ' + (err && err.message));
+      }
+
+      // (c) 没配 API：四个动作**一律**念本地台词，一模一样（主人要求"不改变"）
+      const offCfg = writeCfg({ apiKey: '', enabled: true, muted: false, mockReply: '' });
+      const offLines = {};
+      for (const a of ['happy', 'happyOff', 'angry', 'idle']) {
+        const r = await requestActionLine(a, { force: true });
+        offLines[a] = { source: r.source, text: r.text };
+        push(`没配 API：${a} 念本地台词（不联网、零 token）`,
+          r.source === 'local' && actionLines.LOCAL_LINES[a].includes(r.text),
+          `来源=${r.source} 原因=${r.reason} 台词="${r.text}"`);
+      }
+      push('本地台词表与第 31 轮**逐字未变**（离线体验零变化）',
+        actionLines.LOCAL_LINES.happy[0] === '嘿嘿～今天也很开心！'
+        && actionLines.LOCAL_LINES.happyOff[0] === '好啦，人家不闹了～'
+        && actionLines.LOCAL_LINES.angry[0] === '哼！不理你了。'
+        && actionLines.LOCAL_LINES.pat.length === 3 && actionLines.LOCAL_LINES.pat[0] === '唔……别摸啦。'
+        && offLines.pat === undefined,
+        `happy/happyOff/angry 首句原样；摸头=${actionLines.LOCAL_LINES.pat.length} 句（不进模型，四个时机的清单里没有它）`);
+
+      // (d) 「对话」关掉时也不许走模型
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: false, mockReply: '不许出现的一句' });
+      const disabledLine = await requestActionLine('angry', { force: true });
+      push('「启用对话」关掉时照样念本地台词（不偷偷联网）',
+        disabledLine.source === 'local' && actionLines.LOCAL_LINES.angry.includes(disabledLine.text),
+        `来源=${disabledLine.source} 原因=${disabledLine.reason}`);
+
+      // (e) 接上 API：走模型，且**人格与时机提示都真的进了提示词**
+      const apiCfg = writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '自检用的假回话' });
+      const modelLine = await requestActionLine('happy', { force: true });
+      push('接上 API：动作台词来自大模型（走完 chat() 整条链路，但不发真请求）',
+        modelLine.source === 'model' && /自检用的假回话/.test(modelLine.text),
+        `来源=${modelLine.source} 台词="${modelLine.text}"`);
+      const promptIdle = buildSystemPrompt({ persona: apiCfg.persona, action: 'idle' });
+      push('大模型收到的是**当前人格**：改人格 → 提示词跟着变（这是"可调"的判据）',
+        promptIdle.includes('主人已经有一阵子没跟你说话了'),
+        '空闲时机的提示词里带上了这个时机独有的指令（人格部分由 (a) 断言盯着）');
+
+      // (f) 走模型失败 → **静默**退回本地台词，技术细节绝不进气泡
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, baseUrl: 'http://127.0.0.1:1', model: 'x', timeoutMs: 3000, mockReply: '' });
+      const fallback = await requestActionLine('angry', { force: true });
+      push('走模型失败 → 静默退回本地台词，气泡里不出现任何技术错误',
+        fallback.source === 'local' && String(fallback.reason).startsWith('fallback_')
+        && actionLines.LOCAL_LINES.angry.includes(fallback.text)
+        && !/fetch|ENOTFOUND|HTTP|timeout/i.test(String(fallback.text)),
+        `来源=${fallback.source} 原因=${fallback.reason} 台词="${fallback.text}"（技术细节只进 artifacts 日志）`);
+
+      // (g) 逐个时机的开关：关掉哪个，哪个就回本地
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', mockReply: '开着的时候来自模型', actionModel: { angry: false } });
+      const angryOff = await requestActionLine('angry', { force: true });
+      const happyOn = await requestActionLine('happy', { force: true });
+      push('「她的话」的开关按时机生效（关掉 angry → 它回本地；happy 照旧走模型）',
+        angryOff.source === 'local' && angryOff.reason === 'action_off'
+        && happyOn.source === 'model',
+        `angry: 来源=${angryOff.source} 原因=${angryOff.reason}；happy: 来源=${happyOn.source}`);
+
+      // (h) 人格真的以文本进了请求的 system（用**独立的人格标记**验，不靠上一句的缓存）
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '人格标记测试', persona: { identity: 'PERSONA_MARK_18075', style: '毒舌一点', quirks: '爱吃白饭' } });
+      const dbg = await apiLinesDebugPrompt('happy');
+      push('人格文本进入实际请求的 system（改人格 = 改她的说话方式）',
+        dbg.system.includes('PERSONA_MARK_18075') && dbg.system.includes('毒舌一点') && dbg.system.includes('爱吃白饭')
+        && dbg.messages[0].role === 'system' && dbg.messages.length === 2,
+        `system 里带 identity/style/quirks 三项；消息数=${dbg.messages.length}（无历史：动作反应是独立一句）`);
+
+      // (i) 空闲主动开口：走模型 → 台词进气泡
+      const idleBase = new Date('2026-06-15T10:00:00').getTime();
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '空闲时会说的话', muted: false, actionModel: { idle: true }, idle: { enabled: true, minutes: 60, perDay: 12, quietFrom: 22, quietTo: 8 } });
+      const idleNowMs = idleBase + 70 * 60 * 1000;   // 注入的"现在"：10:00 之后 70 分钟
+      // ★ 三样都要注入才轮得到"她该开口了"：现在几点 / 上次开口 / **上次主人理她**。
+      //   少了 baselineMs，too_soon 会先把判定拦下来（实测踩过：daily_cap 和 quiet_hours 永远轮不到）。
+      await idleStateInject({ test: true, enabled: true, nowMs: idleNowMs, baseMs: idleBase, baselineMs: idleBase });
+      const idleTick = await idleTickOnce(true);
+      await wait(400);
+      const idleState = await js('window.__petTest.state()');
+      push('空闲满设定时长 → 她主动开口（台词来自大模型，落到气泡里）',
+        idleTick.ok === true && idleTick.reason === 'spoken' && /空闲时会说的话/.test(String(idleTick.text))
+        && /空闲时会说的话/.test(String(idleState.lastSay)),
+        `tick=${idleTick.reason} 台词="${idleTick.text}"（气泡里="${idleState.lastSay}"）`);
+
+      // (j) 每日上限：接着**同一段注入时间**、把上限压到 1 —— 这时今天已经说过 1 次了。
+      //    ⚠️ 必须复用同一个 nowMs：计数是按"本地日期"归零的，换一天就等于归零，
+      //       那样"到上限了没"这条会因为刚归零而永远轮不到（实测踩过）。
+      writeCfg({ idle: { enabled: true, minutes: 60, perDay: 1, quietFrom: 22, quietTo: 8 } });
+      const capInject = await idleStateInject({ test: true, nowMs: idleNowMs, baseMs: idleBase, baselineMs: idleBase });
+      const capped = await idleTickOnce(true);
+      push('每天最多开口 N 次：到上限就闭嘴（不烧 token）',
+        capInject.gate.allow === false && capInject.gate.reason === 'daily_cap'
+        && capped.ok === false && capped.reason === 'daily_cap',
+        `今日已开口 ${capInject.spokenToday}/上限 ${apiConfig.load().idle.perDay} → 判定=${capInject.gate.reason}（不是"她坏了"，是限额到了）`);
+
+      // (k) 静音时段（跨午夜）
+      const quietInject = await idleStateInject({ test: true, nowMs: new Date('2026-06-16T02:00:00').getTime(), baseMs: new Date('2026-06-15T18:00:00').getTime() });
+      push('静音时段（22 点→8 点）里绝不主动开口，跨午夜也算对',
+        quietInject.gate.allow === false && quietInject.gate.reason === 'quiet_hours'
+        && actionLines.inQuietHours(2, 22, 8) === true && actionLines.inQuietHours(12, 22, 8) === false
+        && actionLines.inQuietHours(22, 22, 8) === true && actionLines.inQuietHours(8, 22, 8) === false,
+        `凌晨 2 点 → ${quietInject.gate.reason}；边界：22 点算静音、8 点算结束、中午不算`);
+
+      // (l) 一键静音（右键菜单那一项 / 设置页那个勾）
+      writeCfg({ muted: true });
+      const mutedInject = await idleStateInject({ test: true, nowMs: new Date('2026-06-16T14:00:00').getTime(), baseMs: new Date('2026-06-16T10:00:00').getTime() });
+      push('一键静音：她不再主动开口（主人自己找她聊不受影响）',
+        mutedInject.muted === true && mutedInject.gate.allow === false && mutedInject.gate.reason === 'user_muted',
+        `muted=${mutedInject.muted} 判定=${mutedInject.gate.reason}`);
+      writeCfg({ muted: false });
+
+      // (m) 主人一理她 → 空闲计时归零（刚聊完不许马上"主动搭话"）
+      // ★ 关掉注入的"现在"：这条断言量的就是**真实的墙钟时间**（用假时间会算出天文数字的时间差）。
+      //   但**仍要注入 baselineMs**：markUserActive() 内部走的也是 idleNow()，
+      //   两边必须取同一个时间原点，否则"差了几毫秒"会变成几百万毫秒（实测踩过）。
+      await idleStateInject({ test: true, enabled: false });
+      const t0 = Date.now();   // 现在 / 上次开口 / 上次主人理她 —— 三样用同一个原点
+      await idleStateInject({ test: true, enabled: true, nowMs: t0, baseMs: t0, baselineMs: t0 });
+      markUserActive('selftest');
+      const afterTouch = await idleStateInject({ test: true });
+      push('主人一理她，空闲计时归零（刚互动完不会马上自己冒出来说话）',
+        Math.abs(afterTouch.lastUserAt - t0) < 5000
+        && afterTouch.gate.allow === false && afterTouch.gate.reason === 'too_soon',
+        `lastUserAt 刚更新（差 ${afterTouch.lastUserAt - t0}ms）→ 判定=${afterTouch.gate.reason}`
+        + `（等 ${Math.round((afterTouch.gate.waitMs || 0) / 1000)} 秒后才轮到"可以开口"）`);
+
+      // (n) 配置文件手改坏也不能崩：脏字段一律丢掉、范围值夹回去
+      const dirty = writeCfg({ actionModel: { angry: true, 不存在的时机: true }, idle: { minutes: 9999, perDay: -5, quietFrom: 99, quietTo: 'x' }, persona: { identity: '只填这一项', 乱七八糟: '丢掉' } });
+      push('配置被手改坏也安全：脏字段丢掉、越界值夹回范围、未知时机开关忽略',
+        dirty.actionModel['不存在的时机'] === undefined
+        && dirty.idle.minutes === actionLines.IDLE_LIMITS.minutesMax
+        && dirty.idle.perDay === 0 && dirty.idle.quietFrom === 23
+        && dirty.persona.identity === '只填这一项' && dirty.persona['乱七八糟'] === undefined,
+        `minutes 9999→${dirty.idle.minutes}（上限） perDay -5→${dirty.idle.perDay} quietFrom 99→${dirty.idle.quietFrom}`
+        + ` 未知时机=${dirty.actionModel['不存在的时机']} 未知人格字段=${dirty.persona['乱七八糟']}`);
+
+      // (o) 安全性：渲染层拿不到密钥，也拿不到"能不能直接调模型"的口子
+      // ⚠️ 必须**先放一个（假的）密钥**再量：否则掩码本来就是空的，这条断言会变成恒真（假绿）。
+      writeCfg({ apiKey: 'sk-selftest-not-real' });
+      const secView = JSON.stringify(apiConfig.publicView());
+      push('新面板没有开新的泄密口子（密钥仍然不进渲染层）',
+        !secView.includes('sk-selftest-not-real') && apiConfig.publicView().maskedKey.includes('•'),
+        `安全视图里没有明文密钥（掩码=${apiConfig.publicView().maskedKey}，长度=${secView.length} 字节的视图里找不到 sk- 原文）`);
+    } finally {
+      // 把配置还原成主人本来的那份（自检是客人，不许把主人的设置改坏）
+      restoreCfg();
+      await idleStateInject({ test: true, enabled: false });
+      await js('window.__petTest.sayLine("")');   // 清掉自检留下的台词，后面的截图才干净
+      await wait(200);
+    }
+  }
+
   const shot = path.join(ARTIFACTS, 'shot-interaction.png');
   fs.writeFileSync(shot, (await win.webContents.capturePage()).toPNG());
 
@@ -2080,6 +2326,7 @@ async function sendChat(text, source) {
   const cfg = apiConfig.load();
   const msg = String(text || '').trim().slice(0, 200);
   if (!msg) return { ok: false, kind: 'empty', text: '' };
+  markUserActive('sendChat');   // 主人在跟她说话 → 空闲计时归零（别刚聊完她就"主动搭话"）
   if (chatState.sending) {
     return { ok: false, kind: 'busy', text: '（人家还在想上一句呢…）' };
   }
@@ -2174,11 +2421,238 @@ ipcMain.handle('pet:open-config-file', () => {
 // 长回复要能待在屏幕上：气泡显示时长由渲染层按字数决定（见 renderer.js 的 say）
 ipcMain.on('pet:open-settings', (_e, payload) => openSettingsWindow((payload && payload.source) || 'ipc'));
 
+// =====================================================================================
+// 第 32 轮：她的话 —— 动作类台词可走模型 + 空闲主动开口（带限频与静音）
+//
+// 【为什么判定逻辑不在渲染层】
+//   渲染层只该管"把这句话显示出来"。走模型还是念本地、要不要限频、静音时段算不算，
+//   全部集中在主进程：那里才有配置、网络和日志。渲染层调一次 `pet:action-line` 拿结果。
+//
+// 【两条不能破的底线】
+//   1) 离线零变化：没配 API / 关掉对话 / 模型失败 / 返回空 → 一律退回本地台词（lib/action-lines.js），
+//      一个字都不许变（主人 2026-10-02 的要求）。
+//   2) 失败不进气泡：动作类失败**静默**退回本地台词，技术细节只进 artifacts 日志。
+//      （聊天那条路失败要开口，因为那是主人在问；动作这条路是她在反应，不该蹦英文报错。）
+// =====================================================================================
+
+const lineState = {
+  lastUserAt: 0,     // 最近一次"主人理了她"（点击/拖动/发消息）
+  lastSpokeAt: 0,    // 最近一次空闲开口
+  spoken: 0,         // 今天开口次数（按本地日期归零，见 spokenToday）
+  spokenKey: '',     // 上面那个计数属于哪一天
+  idleBusy: false,   // 正在为"空闲开口"发请求
+};
+let idleTimer = null;
+let idleNotifyInFlight = false;   // 每 30 秒一次心跳，防重入
+
+// 自检用：把"现在几点、主人安静了多久"做成可注入的（否则断言要么等到半夜、要么干等 15 分钟）
+//   nowMs      = 假的"现在"
+//   baseMs     = 假的"上次开口时间"
+//   baselineMs = 假的"上次主人理她时间" —— 缺了它，too_soon 这条闸门会在别的断言前面先拦下来
+//                （第 32 轮实测：不注入 baselineMs 时，daily_cap / quiet_hours 永远轮不到，全被 too_soon 挡）
+const idleTest = { enabled: false, nowMs: 0, baseMs: 0, baselineMs: 0 };
+const idleNow = () => (idleTest.enabled && idleTest.nowMs ? idleTest.nowMs : Date.now());
+
+function todayKey(now) {
+  const d = new Date(now);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+function spokenToday(now) {
+  const k = todayKey(now);
+  if (lineState.spokenKey !== k) { lineState.spokenKey = k; lineState.spoken = 0; }
+  return lineState.spoken;
+}
+
+function markUserActive(reason) {
+  lineState.lastUserAt = idleNow();
+  if (reason) logInput({ src: 'main', type: 'idle-touch', detail: `主人理她了（${reason}）→ 空闲计时归零` });
+}
+
+function idleGateNow() {
+  const cfg = apiConfig.load();
+  const now = idleNow();
+  const base = idleTest.enabled && idleTest.baseMs ? idleTest.baseMs : lineState.lastSpokeAt;
+  const needsBaseline = !!(idleTest.enabled && idleTest.baselineMs);
+  const decision = actionLines.idleGate({
+    idle: cfg.idle,
+    muted: cfg.muted,
+    ready: !!(cfg.enabled && cfg.apiKey && cfg.baseUrl && cfg.model),
+    spokenToday: spokenToday(now),
+    lastSpokeAt: base,
+    lastUserAt: needsBaseline ? idleTest.baselineMs : lineState.lastUserAt,
+  }, now);
+  return {
+    ...decision, now, at: new Date(now).toISOString(), idle: cfg.idle, muted: !!cfg.muted,
+    baselineUsed: needsBaseline ? idleTest.baselineMs : lineState.lastUserAt,
+  };
+}
+
+// 空闲开口的实际动作：走模型 → 塞进气泡。**失败静默**（不打断主人），只在日志里留痕。
+async function idleSpeakOnce() {
+  const cfg = apiConfig.load();
+  const started = Date.now();
+  lineState.spoken = spokenToday(idleNow()) + 1;
+  lineState.lastSpokeAt = idleNow();
+  try {
+    const messages = actionLines.buildActionMessages({
+      persona: cfg.persona, legacyPrompt: cfg.systemPrompt, action: 'idle',
+      userText: '（主人有一阵子没说话了）',
+    });
+    if (cfg.historyRounds > 0) {
+      // 空闲搭话**带上下文**：她能接着刚才聊的事说，而不是每次从零开始（这也是"活"的关键）
+      messages.splice(1, 0, ...chatState.history.slice(-cfg.historyRounds * 2));
+    }
+    const res = await chatApi.chat(cfg, messages);
+    if (res.ok && res.text) {
+      chatState.history.push({ role: 'assistant', content: res.text });
+      const keep = Math.max(2, (cfg.historyRounds || 0) * 2);
+      if (chatState.history.length > keep) chatState.history = chatState.history.slice(-keep);
+      if (win && !win.isDestroyed()) win.webContents.send('pet:say', res.text, 5200);
+      logInput({ src: 'main', type: 'idle-speak', detail: `空闲主动开口成功（${res.ms}ms，今日第 ${lineState.spoken} 次）：${res.text}` });
+      return { ok: true, text: res.text, ms: res.ms };
+    }
+    logInput({ src: 'main', type: 'idle-speak', detail: `空闲主动开口失败 kind=${res.kind} ${res.detail || res.text}（不打扰主人，静默跳过）` });
+    return { ok: false, kind: res.kind, text: res.text, ms: Date.now() - started };
+  } catch (err) {
+    logInput({ src: 'main', type: 'idle-speak', detail: `空闲主动开口异常：${err && err.message}` });
+    return { ok: false, kind: 'error', text: String(err && err.message || err) };
+  }
+}
+
+// 心跳：每 30 秒问一次"该不该开口"。**只问一次判定，不在判定里发请求**（见 devlog 里那条"闸门顺序"的教训）。
+async function idleTickOnce(force) {
+  if (idleNotifyInFlight) return { ok: false, reason: 'busy' };
+  idleNotifyInFlight = true;
+  try {
+    if (lineState.idleBusy) return { ok: false, reason: 'speaking' };
+    const decision = idleGateNow();
+    if (!decision.allow) return { ok: false, reason: decision.reason, decision };
+    logInput({ src: 'main', type: 'idle-tick', detail: `空闲满 ${decision.idle.minutes} 分钟 → 她主动开口（今日第 ${spokenToday(idleNow()) + 1} 次）` });
+    lineState.idleBusy = true;
+    try {
+      const res = await idleSpeakOnce();
+      return { ok: !!res.ok, reason: 'spoken', text: res.text, ms: res.ms, decision };
+    } finally {
+      lineState.idleBusy = false;
+    }
+  } finally {
+    idleNotifyInFlight = false;
+    if (force) idleTest.didForce = true;
+  }
+}
+
+function startIdleTicker() {
+  if (idleTimer) return;
+  // 30 秒粒度足够：最短间隔是 1 分钟，肉眼感知不到这半分钟的误差，而 CPU 几乎为零
+  idleTimer = setInterval(() => { idleTickOnce().catch(() => { /* 心跳不许把进程带崩 */ }); }, 30000);
+  if (idleTimer.unref) idleTimer.unref();   // 别让心跳拦着进程退出
+}
+
+function toggleMute(next, from) {
+  const cur = apiConfig.load().muted;
+  const val = next === undefined ? !cur : !!next;
+  apiConfig.save({ muted: val });
+  logInput({ src: 'main', type: 'mute', detail: `${val ? '静音' : '恢复'}（来源=${from}）` });
+  if (win && !win.isDestroyed()) win.webContents.send('pet:mute-changed', val);
+  return val;
+}
+
+// 动作类台词：走模型还是念本地？——**这是一个函数说了算**，渲染层不重复判一遍。
+async function requestActionLine(action, opts) {
+  const o = opts || {};
+  const allowed = actionLines.ACTIONS.indexOf(action) >= 0;
+  if (!allowed) return { ok: true, source: 'local', action, text: actionLines.pickLocal('click'), reason: 'unknown_action' };
+  const cfg = apiConfig.load();
+  const wantModel = cfg.actionModel[action] !== false;
+  const ready = !!(cfg.enabled && cfg.apiKey && cfg.baseUrl && cfg.model);
+  const base = {
+    text: actionLines.pickLocal(action),
+    // 本地兜底也把"为什么没走模型"说清楚：设置页要显示，自检要断言
+    reason: !wantModel ? 'action_off' : (!cfg.enabled ? 'api_disabled' : (!cfg.apiKey ? 'no_key' : ((!cfg.baseUrl || !cfg.model) ? 'no_model' : 'unknown'))),
+  };
+  if (AUTOTEST && !o.force) return { ok: true, source: 'local', action, force: false, ...base };  if (!ready || !wantModel) {
+    return { ok: true, source: 'local', action, ...base };
+  }
+  // 走模型：**无历史**（动作反应是独立的一句，不把内部提示写进对话历史）
+  try {
+    const messages = actionLines.buildActionMessages({
+      persona: cfg.persona, legacyPrompt: cfg.systemPrompt, action, userText: o.userText,
+    });
+    const res = await chatApi.chat(cfg, messages);
+    if (res.ok && res.text) {
+      logInput({ src: 'main', type: 'action-line', detail: `动作「${action}」走模型成功（${res.ms}ms，${res.text.length} 字）：${res.text}` });
+      return { ok: true, source: 'model', action, text: res.text, raw: res.raw, ms: res.ms, reason: 'ok' };
+    }
+    // 失败不进气泡：动作类走模型的失败**静默**退回本地台词（见函数头注释）
+    logInput({ src: 'main', type: 'action-line', detail: `动作「${action}」走模型失败 kind=${res.kind} ${res.detail || res.text} → 静默退回本地台词` });
+    return { ok: true, source: 'local', action, ...base, reason: `fallback_${res.kind || 'error'}`, ms: res.ms, lastError: res.detail || res.text };
+  } catch (err) {
+    logInput({ src: 'main', type: 'action-line', detail: `动作「${action}」走模型异常：${err && err.message} → 静默退回本地台词` });
+    return { ok: true, source: 'local', action, ...base, reason: 'fallback_error' };
+  }
+}
+
+// 自检用的 idle 状态注入与观测：**处理器与断言共用这一份**，避免"测的是副本"。
+// （pet:idle-state 的 IPC 处理器就是转调它；AUTOTEST 之外一律拒绝注入。）
+function idleStateForTest(payload) {
+  const p = payload || {};
+  if (p.test && !AUTOTEST) return { ok: false, reason: 'not_autotest' };
+  if (p.test) {
+    if (p.nowMs) idleTest.nowMs = Number(p.nowMs);
+    if (p.baseMs !== undefined) idleTest.baseMs = Number(p.baseMs);
+    if (p.baselineMs !== undefined) idleTest.baselineMs = Number(p.baselineMs);
+    if (p.enabled !== undefined) idleTest.enabled = !!p.enabled;
+  }
+  return {
+    ok: true, gate: idleGateNow(), idleTest: { ...idleTest },
+    spokenToday: spokenToday(idleNow()), lastUserAt: lineState.lastUserAt, lastSpokeAt: lineState.lastSpokeAt,
+    muted: !!apiConfig.load().muted,
+  };
+}
+
+ipcMain.handle('pet:action-line', async (_e, payload) => {
+  const action = String((payload && payload.action) || '');
+  return requestActionLine(action, { userText: payload && payload.userText, force: !!(payload && payload.force) });
+});
+// 设置窗口的「看看现在的提示词」：把**最终拼出来的 system 提示词**原样给回去。
+// 只给提示词文本，不含密钥（密钥压根不在提示词里，这条边界见 lib/api-config.js 的注释）。
+ipcMain.handle('pet:debug-prompt', (_e, payload) => {
+  const action = String((payload && payload.action) || 'idle');
+  const cfg = apiConfig.load();
+  return {
+    action,
+    system: actionLines.buildSystemPrompt({ persona: cfg.persona, legacyPrompt: cfg.systemPrompt, action }),
+    messages: actionLines.buildActionMessages({ persona: cfg.persona, legacyPrompt: cfg.systemPrompt, action }),
+    ready: !!(cfg.enabled && cfg.apiKey && cfg.baseUrl && cfg.model),
+  };
+});
+ipcMain.handle('pet:action-line-lines', () => actionLines.LOCAL_LINES);
+ipcMain.on('pet:user-active', (_e, payload) => markUserActive((payload && payload.reason) || 'ui'));
+ipcMain.on('pet:toggle-mute', (_e, payload) => toggleMute(payload && payload.mute, (payload && payload.source) || 'ipc'));
+ipcMain.handle('pet:mute-get', () => ({ muted: !!apiConfig.load().muted }));
+// 自检专用：把 idle 的时间与状态做成可注入的（**只在 AUTOTEST 下可用**，正式运行一律拒绝）
+ipcMain.handle('pet:idle-state', (_e, payload) => idleStateForTest(payload));
+ipcMain.handle('pet:idle-tick', async (_e, payload) => {
+  const p = payload || {};
+  if (p.test && !AUTOTEST) return { ok: false, reason: 'not_autotest' };
+  if (p.test) {
+    if (p.nowMs) idleTest.nowMs = Number(p.nowMs);
+    if (p.baseMs !== undefined) idleTest.baseMs = Number(p.baseMs);
+    // 自检注入的时间只在本次 tick 有效，跑完就关，免得污染后面的断言
+    idleTest.enabled = true;
+  }
+  const res = await idleTickOnce(true);
+  if (p.test) idleTest.enabled = false;
+  return res;
+});
+
 app.whenReady().then(() => {
   // 配置路径依赖 userData，所以要在 whenReady 之后（也是 app.getPath 可用的最早时机）。
   // userData 就是 %APPDATA%\dsh-desktop-pet —— 便携版和安装版共用同一份设置。
   apiConfig.init(app.getPath('userData'));
+  lineState.lastUserAt = Date.now();   // 刚启动 = 主人刚理过她，不该一上来就主动开口
   createWindow();
+  startIdleTicker();                   // 空闲开口心跳（每 30 秒判一次，判据在 idleGateNow）
 });
 
 app.on('window-all-closed', () => {

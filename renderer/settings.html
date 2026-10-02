@@ -4,14 +4,15 @@
   <meta charset="utf-8" />
   <!-- 设置窗口是**普通窗口**（不透明、不穿透），CSP 仍然收紧：脚本只许本地文件 -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
-  <title>桌宠 · 设置（接入 API）</title>
+  <title>桌宠 · 设置（接入 API · 她的话）</title>
   <link rel="stylesheet" href="settings.css" />
 </head>
 <body>
   <header class="head">
-    <h1>接入 API，让她会说话</h1>
-    <p class="sub">填上你自己的大模型接口，左键点开她 → 在「和她说…」那一行打字，她就用大模型回你。
-      <strong>密钥只存在这台电脑上</strong>（主进程读写），不会发给别人、也不会跟着安装包走。</p>
+    <h1>让她会说话，也让她像你设定的那个人</h1>
+    <p class="sub">填上你自己的大模型接口，「和她说…」就能聊；再往下可以调 <strong>她的性格</strong> 和
+      <strong>哪些时机让她动脑子说话</strong>。<strong>密钥只存在这台电脑上</strong>（主进程读写），
+      不会发给别人、也不会跟着安装包走。</p>
   </header>
 
   <main>
@@ -51,6 +52,77 @@
       </div>
     </section>
 
+    <!-- ============ 第 32 轮：人格 ============ -->
+    <section class="card">
+      <details id="personaDetails" open>
+        <summary>她的性格（人格）</summary>
+        <p class="tip">这里是"她是谁"。填了就按你写的来；**留空 = 用内置的鲸鱼娘**。
+          下面几个框会被拼成发给大模型的系统提示词（台词来源见下一节）。</p>
+        <div class="row">
+          <span class="label">性格预设（一键切换，切完还能逐项改）</span>
+          <div class="presets" id="personaPresets"></div>
+        </div>
+        <!-- 字段由 settings.js 按主进程给的 PERSONA_FIELDS 生成（加字段只改 lib/action-lines.js） -->
+        <div id="personaFields"></div>
+        <div class="row">
+          <label class="label" for="systemPrompt">高级：整段系统提示词（填了就**整块覆盖**上面的分项人格）</label>
+          <textarea id="systemPrompt" rows="3" spellcheck="false" placeholder="留空 = 用上面的分项人格 / 内置的她"></textarea>
+        </div>
+        <div class="row">
+          <button type="button" id="previewPrompt" class="ghost">看看现在的提示词长什么样</button>
+        </div>
+      </details>
+    </section>
+
+    <!-- ============ 第 32 轮：她的话 ============ -->
+    <section class="card">
+      <details id="talkDetails" open>
+        <summary>她的话（哪些时机动脑子说）</summary>
+        <p class="tip">打勾的时机**接上 API 后会由大模型现场生成**一句话（等模型说完再开口）；
+          没打勾、或者没配好 API / 调用失败，就退回<strong>本地台词</strong>——本机那几句一个字都不变。</p>
+        <div class="row">
+          <span class="label">让这些时机用大模型说话</span>
+          <!-- 开关由 settings.js 按主进程给的 actionLabels 生成 -->
+          <div id="actionToggles"></div>
+          <p class="tip">「摸头」永远是本地台词（不在上面的列表里）。</p>
+        </div>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="idleEnabled" />
+            <span>空闲时让她自己找你说一句</span>
+          </label>
+          <p class="tip" id="idlePreview">…</p>
+        </div>
+        <div class="row">
+          <label class="label" for="idleMinutes">安静多久之后开口：<span id="idleMinVal">15</span> 分钟</label>
+          <input id="idleMinutes" type="range" min="1" max="120" step="1" value="15" />
+        </div>
+        <div class="row">
+          <label class="label" for="idlePerDay">每天最多主动开口：<span id="idleDayVal">12</span> 次（0 = 不限）</label>
+          <input id="idlePerDay" type="range" min="0" max="60" step="1" value="12" />
+        </div>
+        <div class="row">
+          <label class="label">静音时段（这段时间她绝不主动开口）</label>
+          <div class="key-row">
+            <select id="quietFrom"></select>
+            <span class="tip" style="margin:0">点到</span>
+            <select id="quietTo"></select>
+          </div>
+          <p class="tip">两端相同 = 不设静音时段。跨午夜也可以（例如 23 点到 8 点）。</p>
+        </div>
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="muted" />
+            <span>安静一会儿（一键关掉主动开口，右键菜单里也有这一项）</span>
+          </label>
+          <p class="tip">只影响<strong>她主动</strong>说话；你打字跟她聊不受影响。</p>
+        </div>
+        <div class="row">
+          <button type="button" id="tryLine" class="ghost">试一句（让大模型按当前人格现场说一句）</button>
+        </div>
+      </details>
+    </section>
+
     <section class="card">
       <details>
         <summary>高级（一般不用动）</summary>
@@ -70,10 +142,6 @@
         <div class="row">
           <label class="label" for="timeoutMs">超时（毫秒）：<span id="toVal">20000</span></label>
           <input id="timeoutMs" type="range" min="3000" max="60000" step="1000" value="20000" />
-        </div>
-        <div class="row">
-          <label class="label" for="systemPrompt">人设提示词（留空 = 用内置的她）</label>
-          <textarea id="systemPrompt" rows="4" spellcheck="false" placeholder='留空就用内置人设：自称「人家」的鲸鱼娘、说话不超过 40 字…'></textarea>
         </div>
       </details>
     </section>

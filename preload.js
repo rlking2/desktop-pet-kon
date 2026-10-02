@@ -35,6 +35,19 @@ contextBridge.exposeInMainWorld('pet', {
   onPointerOutside: (cb) => ipcRenderer.on('pet:pointer-outside', () => cb()),
   focusWindow: () => ipcRenderer.send('pet:focus-window'),
 
+  // ---------- 第 32 轮：她的话（动作类台词可走模型 + 空闲开口 + 静音） ----------
+  // 渲染层只问"这一刻该说哪句"，**判定全在主进程**（走模型还是念本地、限频、静音时段）。
+  // 所以这里没有"读配置"的通道，也没有"直接调用模型"的通道 —— 渲染层碰不到密钥、也花不了 token。
+  actionLine: (payload) => ipcRenderer.invoke('pet:action-line', payload),
+  localLines: () => ipcRenderer.invoke('pet:action-line-lines'),
+  // 设置窗口"看看现在的提示词"：只回提示词文本，不含密钥
+  debugPrompt: (payload) => ipcRenderer.invoke('pet:debug-prompt', payload),
+  // 主人理了她（点击/拖动）：让主进程把"空闲计时"归零，免得刚互动完她就主动开口
+  userActive: (reason) => ipcRenderer.send('pet:user-active', { reason }),
+  muteGet: () => ipcRenderer.invoke('pet:mute-get'),
+  toggleMute: (payload) => ipcRenderer.send('pet:toggle-mute', payload),
+  onMuteChanged: (cb) => ipcRenderer.on('pet:mute-changed', (_e, muted) => cb(muted)),
+
   // 拖动（手动实现，因为 CSS drag 区域与逐像素穿透冲突）
   getBounds: () => ipcRenderer.invoke('pet:get-bounds'),
   dragStart: (payload) => ipcRenderer.send('pet:drag-start', payload),

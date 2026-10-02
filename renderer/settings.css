@@ -33,7 +33,7 @@ body {
 .tip { margin-top: 3px; font-size: 10.5px; line-height: 1.5; color: #6b7d8f; }
 .tip code, code { background: rgba(120, 140, 160, .14); border-radius: 4px; padding: 0 4px; font-size: 10.5px; }
 
-input[type="text"], input[type="password"], textarea {
+input[type="text"], input[type="password"], textarea, select {
   width: 100%;
   padding: 7px 9px;
   font-size: 12.5px;
@@ -45,7 +45,7 @@ input[type="text"], input[type="password"], textarea {
   outline: none;
   user-select: text;
 }
-input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+input[type="text"]:focus, input[type="password"]:focus, textarea:focus, select:focus {
   border-color: #5aa9e6;
   box-shadow: 0 0 0 2px rgba(90, 169, 230, .2);
 }
@@ -100,3 +100,35 @@ button.ghost { background: rgba(120, 140, 160, .08); }
 .foot { margin-top: 10px; font-size: 10.5px; line-height: 1.6; color: #6b7d8f; word-break: break-all; }
 
 details summary { cursor: pointer; font-size: 12px; font-weight: 700; color: #33475b; margin-bottom: 8px; }
+
+/* ---------- 第 32 轮：人格 / 她的话 ---------- */
+/* 分项人格的输入框由 settings.js 动态生成，紧凑一点 —— 设置窗视口只有约 456x658（150% DPI） */
+.persona-field { margin-bottom: 8px; }
+.persona-field textarea { font-size: 12px; }
+
+/* 「让这些时机用大模型说话」的开关列表：一行一个，勾选框在左 */
+.toggles { display: flex; flex-direction: column; gap: 5px; }
+.toggles label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #33475b; cursor: pointer; }
+.toggles input[type="checkbox"] { width: 15px; height: 15px; accent-color: #5aa9e6; }
+.toggles .off-hint { margin-left: 4px; font-size: 10.5px; color: #96a5b3; }
+
+/* 静音时段那两个下拉：并排、窄一些，别各占一整行 */
+select { width: auto; min-width: 84px; padding: 6px 8px; font-size: 12.5px; }
+.key-row select { flex: 0 0 auto; }
+
+/* 整段提示词预览：等宽、可滚动、可选中复制 */
+#promptPreview {
+  margin-top: 6px;
+  max-height: 150px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  color: #22384d;
+  background: #f7fbff;
+  border: 1px solid rgba(120, 140, 160, .35);
+  border-radius: 7px;
+  user-select: text;
+}
