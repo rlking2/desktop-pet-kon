@@ -5,6 +5,9 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { installClickThrough } = require('./lib/click-through');
 const { loadAnimationManifest } = require('./lib/assets');
+// API 设置 + 对话：都只在主进程用（密钥绝不发给渲染层，理由见 lib/api-config.js 顶部注释）
+const apiConfig = require('./lib/api-config');
+const chatApi = require('./lib/chat');
 
 const ROOT = __dirname;
 const ARTIFACTS = path.join(ROOT, 'artifacts');
@@ -22,6 +25,20 @@ let panelWinW = 470;
 const PANEL_H = 250;   // 与收起态同高（人物位置天然不变）
 let panelOpen = false;
 let panelSide = null;
+// 气泡列宽度（第 26 轮）：
+//   主人反馈"回复与提问窗口总在同一侧"——因为气泡原本居中在**整个窗口**里，
+//   面板展开后它是骑在"面板列 + 桌宠列"中间的，看起来就压着提问框。
+//   修法不是"把气泡往边上推"（推出去就被窗口裁掉，实测气泡被推到 -42px），
+//   而是**给气泡专门留一列**：窗口 = [气泡列][面板列][桌宠列]（面板在右时）。
+//   气泡的 CSS 是 left:50% 居中，所以只要"气泡列"在两种状态下一样宽，
+//   同一句话就永远出现在屏幕上的同一个位置，且**永远不碰面板**（列与列不重叠）。
+//   初始 220 是兜底；渲染层启动后会量出真实宽度并回报（见 pet:set-bubble-width）。
+//   第 27 轮起气泡是固定 150px 宽（放在她左上方那一小块），气泡列 = 150 + 两侧余量 ≈ 190。
+let BUBBLE_COL = 190;
+// 桌宠列宽度（实测）：窗口宽度 = BUBBLE_COL + 面板列 + PET_COL，三者要严丝合缝，
+// 否则 grid 会把多出来的像素摊到左边 → 桌宠/气泡整体偏移（第 26 轮实测偏 73px）。
+// 初始值按"显示宽度 + 28 边距"估，渲染层量到解析值后会回报更准的（见 pet:set-pet-column）。
+let PET_COL = 198;
 
 let win = null;
 let clickThrough = null;
@@ -57,12 +74,21 @@ function logInput(entry) {
 }
 
 // 单实例：第二次启动只把已有窗口叫到前面
+//
+// ★ 为什么第二次启动要"说句话"：
+//   打包成 桌宠.exe 之后，主人是双击启动的。如果已经有一只在跑（比如之前用 npm start 开的那只），
+//   第二个进程会拿不到锁 → 直接退出 → 主人看到的是"双击了但什么都没发生"，以为程序坏了。
+//   所以这里除了把已有窗口叫到前面，还让她**冒个气泡**说明情况。
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (win) { win.show(); win.focus(); }
+    if (!win) return;
+    win.show();
+    win.focus();
+    logInput({ src: 'main', type: 'second-instance', detail: '第二次启动：已把现有窗口叫到前面' });
+    try { win.webContents.send('pet:say', '人家在这儿呢～（一次只能有一只哦）'); } catch { /* 窗口还没加载好就算了 */ }
   });
 }
 
@@ -71,9 +97,13 @@ function createWindow() {
   initInputLog();
 
   win = new BrowserWindow({
-    width: WIN_W,
+    // ★ 收起态也要带"气泡列"（第 26 轮）：气泡平时居中在**桌宠那一列**，
+    //   而面板展开后桌宠列会被挤到最右边 —— 如果不给气泡留出固定的一列，
+    //   同一句话就会在"开面板/关面板"两种状态下出现在两个位置，看着像漂移。
+    //   所以收起态窗口宽度 = 气泡列 + 桌宠列，气泡始终居中在气泡列里。
+    width: closedWidth(),
     height: WIN_H,
-    x: process.env.DSH_PET_POS === 'top' ? work.x + 60 : work.x + work.width - WIN_W - MARGIN,
+    x: process.env.DSH_PET_POS === 'top' ? work.x + 60 : work.x + work.width - closedWidth() - MARGIN,
     y: process.env.DSH_PET_POS === 'top' ? work.y + 2 : work.y + work.height - WIN_H - MARGIN,
     frame: false,
     transparent: true,
@@ -225,7 +255,10 @@ function applyChineseMenus() {
         { label: '回到底部右侧', click: () => {
             if (!win || win.isDestroyed()) return;
             const work = screen.getPrimaryDisplay().workArea;
-            win.setBounds({ x: work.x + work.width - WIN_W - MARGIN, y: work.y + work.height - WIN_H - MARGIN, width: WIN_W, height: WIN_H });
+            const cw = Math.round(targetWidth());
+            // 拖动防漂移靠 __designSize 锁存，这里搬完窗口必须同步，否则下次拖动会拿旧尺寸回写
+            win.setBounds({ x: work.x + work.width - cw - MARGIN, y: work.y + work.height - WIN_H - MARGIN, width: cw, height: WIN_H });
+            win.__designSize = { w: cw, h: WIN_H };
           } },
         { type: 'separator' },
         { label: '关闭窗口', role: 'close' },
@@ -293,14 +326,21 @@ function buildMenuTemplate() {
   return [
     { label: '桌宠 · 阶段1', enabled: false },
     { type: 'separator' },
-    { label: '永远置顶', type: 'checkbox', checked: win.isAlwaysOnTop(), click: (mi) => win.setAlwaysOnTop(mi.checked, 'floating') },
-    { label: '让她说句话', click: () => win.webContents.send('pet:say', '主人……人家在的啦，哼。') },
+    // 「开心」是**开关**：点一次保持住这个动作（不自动收尾），再点一次才退出。
+    // 勾选状态由渲染层回报（menuState.poseGroup），所以主人一眼能看出现在是不是保持中。
+    { label: '开心（保持动作）', type: 'checkbox', checked: menuState.poseGroup === 'happy', click: () => win.webContents.send('pet:action', 'happy') },
     { label: '摸头', click: () => win.webContents.send('pet:action', 'headpat') },
-    { label: '喂白饭（+1 token）', click: () => win.webContents.send('pet:action', 'rice') },
+    { type: 'separator' },
+    // 「设置…」= 接入 API 的入口（填 Base URL / 模型 / 密钥）。
+    // 独立窗口，不是塞进桌宠那个透明窗口：表单需要正常的尺寸和焦点。
+    { label: '设置…（接入 API）', click: () => openSettingsWindow('menu') },
     { type: 'separator' },
     { label: '回到底部右侧', click: () => {
         const work = screen.getPrimaryDisplay().workArea;
-        win.setBounds({ x: work.x + work.width - WIN_W - MARGIN, y: work.y + work.height - WIN_H - MARGIN, width: WIN_W, height: WIN_H });
+        const cw = Math.round(targetWidth());
+            // 拖动防漂移靠 __designSize 锁存，这里搬完窗口必须同步，否则下次拖动会拿旧尺寸回写
+            win.setBounds({ x: work.x + work.width - cw - MARGIN, y: work.y + work.height - WIN_H - MARGIN, width: cw, height: WIN_H });
+            win.__designSize = { w: cw, h: WIN_H };
       } },
     { label: '开发者工具', click: () => win.webContents.openDevTools({ mode: 'detach' }) },
     { type: 'separator' },
@@ -355,8 +395,41 @@ ipcMain.handle('pet:get-bounds', () => {
   return { x: b.x, y: b.y, width: b.width, height: b.height };
 });
 
+// 鼠标此刻的屏幕坐标 + 窗口边界：给渲染层做"靠近→离开"的兜底判定。
+// 为什么要这个：鼠标离开角色后窗口可能立刻进入穿透态（setIgnoreMouseEvents(true, forward)），
+// 而穿透态的窗口**不一定还能收到 mousemove** → 渲染层的 setHover(false) 就永远等不到，
+// 人物卡在「靠近」那一帧（主人 2026-09-25 反馈：往下/往右移开不恢复待机动作）。
+//
+// ⚠️ 自检时屏幕坐标这条路走不通：`win.getBounds()`（Electron 的逻辑像素）和渲染层
+//    `window.screenX`（Chromium 的 CSS 像素）在 150% DPI 下**不是同一个数**，
+//    拿两头凑出来的"假鼠标位置"会落在角色里面，兜底判定永远 inside=true（人家第一版就白跑了）。
+//    所以自检直接给 `win.__fakeCursor`（**窗口内坐标**），这里原样返回、不再做换算。
+ipcMain.handle('pet:get-cursor', () => {
+  if (!win || win.isDestroyed()) return null;
+  const b = win.getBounds();
+  if (win.__fakeCursor) {
+    return { screenX: win.__fakeCursor.x, screenY: win.__fakeCursor.y, fake: true, relative: true,
+             winX: 0, winY: 0, winW: b.width, winH: b.height };
+  }
+  try {
+    const pt = screen.getCursorScreenPoint();
+    return { screenX: pt.x, screenY: pt.y, winX: b.x, winY: b.y, winW: b.width, winH: b.height, fake: false, relative: false };
+  } catch {
+    return { screenX: null, screenY: null, winX: b.x, winY: b.y, winW: b.width, winH: b.height, fake: false, relative: false };
+  }
+});
+
 // 素材清单：主进程读磁盘 → 渲染层用（避开 CSP 对 fetch 的限制）
 ipcMain.handle('pet:asset-manifest', () => loadAnimationManifest(path.join(ROOT, 'assets')));
+
+// 「保持动作」状态：渲染层是真状态，主进程只存一份镜像，用来给右键菜单打勾。
+// （菜单是每次右键时现搭的，所以直接读这份镜像即可。）
+const menuState = { poseGroup: null };
+ipcMain.on('pet:pose', (_e, payload) => {
+  const group = payload && payload.group ? String(payload.group) : null;
+  menuState.poseGroup = group;
+  logInput({ src: 'renderer', type: 'pose', detail: group ? `保持动作 = ${group}` : '保持动作已退出' });
+});
 
 // 待办面板：展开时把窗口**横向**扩展，面板出现在桌宠的右侧（右侧放不下就放左侧）。
 //
@@ -373,41 +446,25 @@ ipcMain.on('pet:set-panel', (_e, payload) => {
 
   const display = screen.getPrimaryDisplay();
   const work = display.workArea;      // 逻辑像素
-  const sf = display.scaleFactor || 1;
   const b = win.getBounds();
-  // 用实际尺寸夹取（Windows 会把窗口吸到物理像素网格，实际比设计值大 1~2px）
-  const quant = (v) => Math.ceil(Math.round(v * sf) / sf) + 1;
 
   let target;
   if (open) {
-    const need = panelWinW;   // 由渲染层按素材宽高比回报（见 pet:set-content-ratio）
-    // 高度**必须用设计高度 WIN_H**，不能用当前高度 b.height ——
-    // 未展开时的高度可能已被 DPI 吸附成 251，用它会让"展开"比"收起"高 1px，
-    // 从而把桌宠的屏幕 Y 推偏（实测偏移 5px）。主人明确要求过"人物位置不能动"。
-    const h = WIN_H;
-    // 优先放右侧（窗口左边不动 → 桌宠位置完全不变）
-    const spaceRight = work.x + work.width - (b.x + b.width);
-    const spaceLeft = b.x - work.x;
-    let side;
-    if (spaceRight >= need) side = 'right';
-    else if (spaceLeft >= need) side = 'left';
-    else side = spaceRight >= spaceLeft ? 'right' : 'left'; // 两边都不够就选宽的一边（会被夹取）
-
-    let x;
-    if (side === 'right') {
-      x = b.x;                                  // 桌宠位置不变
-      x = Math.min(x, work.x + work.width - quant(need)); // 右边放不下则整体左移
-    } else {
-      x = b.x + b.width - need;                 // 面板放左边：窗口左边外扩，桌宠位置不变
-      x = Math.max(x, work.x);
-    }
-    target = { x: Math.round(x), y: b.y, width: need, height: h, side };
+    // 宽度 = [气泡列][面板列][桌宠列]（面板在右时）—— 气泡有自己的一列，就不会压到面板上
+    const need = Math.round(openWidth());
+    // ★ 桌宠的屏幕位置按"当前窗口右边界"算 —— 桌宠列永远贴着窗口右边，所以
+    //   `b.x + b.width` 就是她在屏幕上的右边界，收起态和展开态都成立。
+    //   窗口的**右边界不动**、只往左长，桌宠就一动不动（自检有专项断言盯这条）。
+    //   （第 26 轮踩过的坑：老写法"基于当前 bounds 推左边界"会被工作区左边界夹住，
+    //     夹住之后窗口只能往右长 → 桌宠被推走 231px。锚点法的规矩是"先定人物在哪，再让窗口适配"。）
+    const petRightNow = b.x + b.width;
+    const x = Math.max(work.x, Math.min(petRightNow - need, work.x + work.width - need));
+    target = { x: Math.round(x), y: b.y, width: need, height: WIN_H, side: 'right' };
   } else {
-    // 收起：**明确还原到设计尺寸**（不能用当前高度——那样每开合一次就长高几像素，
-    // 实测连续开合把窗口从 250 累积到 270），并保持桌宠屏幕位置不变。
-    const side = win.__panelSide || 'right';
-    const x = side === 'right' ? b.x : b.x + b.width - WIN_W;
-    target = { x: Math.round(x), y: b.y, width: WIN_W, height: WIN_H, side: null };
+    // 收起：还原成 `[气泡列][桌宠列]`（面板列消失、气泡回到她正上方），右边界不动 → 桌宠不动
+    const closedW = Math.round(closedWidth());
+    const x = Math.max(work.x, b.x + b.width - closedW);
+    target = { x: Math.round(x), y: b.y, width: closedW, height: WIN_H, side: null };
   }
 
   win.__panelSide = target.side;
@@ -434,10 +491,36 @@ ipcMain.on('pet:focus-window', () => {
   win.focus();
   win.webContents.focus();
 });
+// 收起态 / 展开态宽度（第 29 轮定稿）：
+//   三个东西都是**绝对定位**（见 style.css）：人物钉在右下角；面板打开时**紧贴她的左边**；
+//   气泡紧跟人物（收起在她左上、展开在她右上 —— 主人 2026-09-27 定的）。
+//     收起：气泡段 + 人物列
+//     展开：人物列 + 面板（300）+ 气泡段  ← 面板贴着她左边，气泡在她右边，两边都得留够
+function bubbleSpan() { return Math.max(PET_COL, BUBBLE_COL); }
+function closedWidth() { return Math.round(PET_COL + bubbleSpan()); }
+function openWidth() { return Math.round(PET_COL + 300 + bubbleSpan()); }
+function targetWidth() { return panelOpen ? openWidth() : closedWidth(); }
+
+// 把窗口摆正：**右边界不动**，只改宽度（桌宠贴右边 → 屏幕位置天然不变）。
+function applyWindowWidth(reason) {
+  if (!win || win.isDestroyed()) return null;
+  const work = screen.getPrimaryDisplay().workArea;
+  const b = win.getBounds();
+  const width = Math.round(targetWidth());
+  if (Math.abs(b.width - width) < 2) return { x: b.x, width: b.width };   // 没变化就别折腾窗口
+  const x = Math.max(work.x, b.x + b.width - width);
+  win.setBounds({ x: Math.round(x), y: b.y, width, height: WIN_H });
+  win.__designSize = { w: width, h: WIN_H };
+  logInput({ src: 'main', type: 'window-width',
+    detail: `${reason} → 窗口 ${width}x${WIN_H} @(${Math.round(x)},${b.y})（右边界固定在 ${b.x + b.width}）` });
+  if (clickThrough) setTimeout(() => clickThrough.refreshMask().catch(() => {}), 200);
+  return { x: Math.round(x), width };
+}
+
 // 素材形状回报：渲染层量出"最宽那一帧"的宽高比后告诉主进程，
 // 主进程据此决定：
 //   1) 桌宠列宽度 = 显示宽度 + 边距（竖构图素材列更窄，窗口就能小一点）
-//   2) 面板展开时的窗口宽度 = 面板列 + 桌宠列
+//   2) 窗口宽度 = 气泡列 + 面板列 + 桌宠列（气泡列见下面 pet:set-bubble-width）
 // 为什么不让主进程自己算：帧尺寸信息在 manifest 里，但"显示框"是渲染层的事
 // （CSS 尺寸 + DPR 缩放），由渲染层回报最准。
 ipcMain.on('pet:set-content-ratio', (_e, payload) => {
@@ -445,10 +528,48 @@ ipcMain.on('pet:set-content-ratio', (_e, payload) => {
   if (!ratio || !Number.isFinite(ratio) || ratio <= 0) return;
   // 显示高度固定 200px（竖构图），宽度按素材比例算，并夹在合理范围
   const dispW = Math.max(60, Math.min(200, Math.round(200 * ratio)));
-  const column = dispW + 26;               // 左右边距 12 + 16（见 style.css）
-  panelWinW = 300 + column + 4;
+  PET_COL = dispW;                         // 桌宠列 = 桌宠显示宽度（渲染层随后会给实测值覆盖）
+  panelWinW = 300 + PET_COL;               // 面板列固定 300（288 面板 + 6 边距 ×2）+ 桌宠列
   logInput({ src: 'main', type: 'content-ratio',
-    detail: `素材宽高比 ${ratio.toFixed(3)} → 显示 ${dispW}x200，桌宠列 ${column}，面板态窗口宽 ${panelWinW}` });
+    detail: `素材宽高比 ${ratio.toFixed(3)} → 显示 ${dispW}x200，桌宠列 ≈${PET_COL}，窗口宽 ${panelWinW}（另加气泡列 ${BUBBLE_COL}）` });
+  if (!panelOpen) applyWindowWidth('素材比例回报后重设窗口宽度');
+});
+
+// 气泡列宽度：渲染层量出气泡真实宽度后回报。
+// 为什么要由渲染层量：气泡宽度是 CSS 决定的（内容上限 192 + 内边距 + 边框），
+// 主进程凭空猜容易猜小 —— 猜小了气泡就会被窗口裁掉（第 26 轮第一次修就是这么翻车的）。
+ipcMain.on('pet:set-bubble-width', (_e, payload) => {
+  const w = payload && Number(payload.width);
+  if (!w || !Number.isFinite(w) || w < 120 || w > 400) return;
+  const next = Math.round(w);
+  if (Math.abs(next - BUBBLE_COL) < 2) return;
+  BUBBLE_COL = next;
+  logInput({ src: 'main', type: 'bubble-col', detail: `气泡列宽度 = ${BUBBLE_COL}px（窗口宽 = 气泡列 + 面板列 ${panelWinW}）` });
+  if (!panelOpen) applyWindowWidth('气泡列宽度变化后重设收起态宽度');
+});
+
+// 实测的桌宠列宽度（grid 最后一列的解析宽度）：渲染层回报。
+// 为什么要它：窗口宽度必须**正好等于三列之和**，多一个像素都会被 grid 摊到左边、把桌宠推偏。
+// 主进程原来按"显示宽度 + 边距"估算，实测差了 2px → 桌宠偏 73px（第 26 轮踩的）。
+ipcMain.on('pet:set-pet-column', (_e, payload) => {
+  const w = payload && Number(payload.width);
+  if (!w || !Number.isFinite(w) || w < 80 || w > 400) return;
+  const next = Math.round(w);
+  // ★ 每次都要把 CSS 的 --sprite-w 同步成"sprite 的真实宽度"（第 27 轮踩的坑）：
+  //   网格列宽是 `var(--sprite-w)`，而 sprite 的显示宽度由素材比例决定。
+  //   网格列比 sprite 窄 → 人物**溢出到列外**（实测溢出 37px）→ 窗口比"三列之和"宽出一截
+  //   → grid 把那截空白塞在她**左边** → 气泡看着离她很远（主人就是因为这个说"脱离人物"）。
+  if (win && !win.isDestroyed()) {
+    try {
+      win.webContents.executeJavaScript(
+        `(() => { const p = document.getElementById('pet'), s = document.getElementById('sprite');`
+        + ` p.style.setProperty('--sprite-w', '${next}px'); p.style.width = '${next}px'; s.style.width = '${next}px'; return true; })()`).catch(() => {});
+    } catch { /* 窗口还没加载完就算了 */ }
+  }
+  if (Math.abs(next - PET_COL) < 1) return;
+  PET_COL = next;
+  logInput({ src: 'main', type: 'pet-column', detail: `桌宠列宽（实测）= ${PET_COL}px` });
+  if (!panelOpen) applyWindowWidth('桌宠列宽实测回报后重设窗口宽度');
 });
 
 // 形象变化后重算穿透掩码（渲染层加载完帧动画会请求一次）
@@ -553,15 +674,28 @@ async function runSelfCheck() {
     const js = (code) => win.webContents.executeJavaScript(code);
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+    // 打包身份断言（安装包踩坑换来的）：
+    //   Electron 用 app.getName() 拼 userData 目录（%APPDATA%\<name>），而 electron-builder
+    //   默认把 productName 当名字注入打包后的 package.json → 安装版的待办事项会另开一份
+    //   （便携版存的看不见），单实例锁也会分成两把。所以这里把"名字必须还是仓库包名"钉死。
+    //   注意：自检为了不影响主人的那只桌宠会加 --user-data-dir 做隔离，那种情况下
+    //   userData 目录名当然是临时的 —— 只查名字，不查目录名。
+    const userDataOverridden = process.argv.some((a) => a.startsWith('--user-data-dir'));
+    push('打包身份未被改（app.getName() 仍是仓库包名，userData 才不会被分家）',
+      app.getName() === 'dsh-desktop-pet' &&
+      (userDataOverridden || path.basename(app.getPath('userData')) === 'dsh-desktop-pet'),
+      `app.getName()=${app.getName()}；userData=${app.getPath('userData')}` +
+      `${userDataOverridden ? '（自检用了 --user-data-dir 隔离，属正常）' : ''}` +
+      '；名字若被改成"桌宠"，便携版的待办事项会看不见，还会跑出两只桌宠');
     push('窗口可见', state.windowVisible === true, `visible=${state.windowVisible}`);
     push('永远置顶生效', state.alwaysOnTop === true, `alwaysOnTop=${state.alwaysOnTop}`);
     // 用页面视口（逻辑 CSS 像素）判定尺寸；Windows 在高 DPI 下会把窗口吸到整数物理像素网格，
     // 1.5 缩放时 260x320 会变成 264x324，属于系统行为，不是 bug → 给 ±4 逻辑像素容差
     const TOL = 6; // 加上菜单栏可能带来的 1px 取整，容差放宽到 ±6
-    const dw = Math.abs(metrics.innerSize.w - WIN_W);
+    const dw = Math.abs(metrics.innerSize.w - closedWidth());
     const dh = Math.abs(metrics.innerSize.h - WIN_H);
     push('窗口尺寸符合设计(±4)', dw <= TOL && dh <= TOL,
-      `视口 ${metrics.innerSize.w}x${metrics.innerSize.h} / 设计 ${WIN_W}x${WIN_H}（偏差 ${dw}x${dh}，DPR ${state.devicePixelRatio}）`);
+      `视口 ${metrics.innerSize.w}x${metrics.innerSize.h} / 设计 ${closedWidth()}x${WIN_H}（= 气泡列 ${BUBBLE_COL} + 面板列 ${panelWinW}；偏差 ${dw}x${dh}，DPR ${state.devicePixelRatio}）`);
     push('完整落在工作区内', state.insideWorkArea === true, `bounds=${JSON.stringify(b)} workArea=${JSON.stringify(display.workArea)}`);
     push('透明背景（body 非纯色）', /rgba\(0, 0, 0, 0\)|transparent/.test(metrics.bodyBg), `bodyBg=${metrics.bodyBg}`);
     push('角色容器已渲染', metrics.petVisible === true && !!metrics.petRect, `petRect=${JSON.stringify(metrics.petRect)}`);
@@ -580,6 +714,18 @@ async function runSelfCheck() {
           metrics.canvasSize === '130x130', `canvas=${metrics.canvasSize}`);
       }
     }
+    // 主人 2026-09-24 要求去掉"靠近后底下那行白色提示"（「按住拖我走 · 右键有菜单」），
+    // 连 .pet 的 title="按住拖动" 原生提示一起去掉了。这条断言防止以后被人手滑加回来。
+    {
+      const hintEl = await js('!!document.querySelector(".hint")');
+      const petTitle = await js('document.getElementById("pet").getAttribute("title")');
+      const petRectNoHint = await js(`(() => { const r = document.getElementById('pet').getBoundingClientRect();
+        return { w: Math.round(r.width), h: Math.round(r.height) }; })()`);
+      push('靠近时不再有任何提示文字/提示气泡（主人要求去掉）',
+        hintEl === false && !petTitle,
+        `.hint 元素存在=${hintEl}；#pet 的 title=${petTitle === null ? '（无）' : `"${petTitle}"`}`
+        + `；命中区 ${petRectNoHint.w}x${petRectNoHint.h}（正好等于角色本身，不再多出提示那一截）`);
+    }
     // 角色渲染状态：有素材在播帧动画，没素材画"空位提示"。两条路都必须真的画出东西
     // （否则整个窗口都是空气 → 鼠标事件进不来 → 点击/拖动/穿透全部失效）
     {
@@ -587,11 +733,11 @@ async function runSelfCheck() {
       if (sp.available) {
         push('帧动画已启用', sp.placeholder === false && (sp.groups || []).length > 0 && sp.drewFrames > 0,
           `动作=[${(sp.groups || []).join(', ')}] 待机=${sp.baseGroup} 已绘制 ${sp.drewFrames} 帧`);
-        // 三个动作组各自独立可用（主人分配：待机 7/8/9、交互 1/5/6、靠近 J）
-        const need = ['idle', 'interact', 'hover'];
+        // 四个动作组各自独立可用（主人分配：待机 7/8/9、交互 1/5/6、靠近 J、开心 = 主人给的那张定格图）
+        const need = ['idle', 'interact', 'hover', 'happy'];
         const missing = need.filter((n) => !(sp.groups || []).includes(n));
-        push('待机/交互/靠近 三组动作都已加载', missing.length === 0,
-          missing.length ? `缺少: ${missing.join(', ')}（现有: ${(sp.groups || []).join(', ')}）` : `三组齐全: ${need.join(', ')}`);
+        push('待机/交互/靠近/开心 四组动作都已加载', missing.length === 0,
+          missing.length ? `缺少: ${missing.join(', ')}（现有: ${(sp.groups || []).join(', ')}）` : `四组齐全: ${need.join(', ')}`);
       } else {
         push('无素材时显示空位提示（保证可点可拖、穿透掩码有实体）',
           sp.placeholder === true && sp.drewFrames > 0,
@@ -642,9 +788,9 @@ async function runSelfCheck() {
       const opened = await js('window.__petTest.memoSnapshot()');
       push('左键点击桌宠展开待办面板', opened.open === true && opened.panelVisible === true,
         `open=${opened.open} visible=${opened.panelVisible}`);
-      push('面板默认容量 5 栏、两列布局', opened.cap === 5 && opened.renderedRows === 5,
+      push('面板默认容量 4 栏、两列布局', opened.cap === 4 && opened.renderedRows === 4,
         `容量=${opened.cap} 渲染栏位=${opened.renderedRows} 空栏位=${opened.emptyRows}`);
-      push('每栏都有勾选框', opened.boxCount === 5, `勾选框数=${opened.boxCount}`);
+      push('每栏都有勾选框', opened.boxCount === 4, `勾选框数=${opened.boxCount}`);
       push('输入框获得键盘焦点（能打字）', opened.inputFocused === true,
         `focused=${opened.inputFocused}`);
       push('面板完整在窗口内（不会被裁掉）', opened.panelInViewport === true,
@@ -670,7 +816,7 @@ async function runSelfCheck() {
         `加入 ${withTasks.count} 条：${withTasks.tasks.join(' / ')}（逐次计数 ${added.counts.join(',')}）`);
       push('任务按顺序落入下方栏位', withTasks.tasks[0] === '写文档' && withTasks.tasks[2] === '喂桌宠',
         `tasks=${JSON.stringify(withTasks.tasks)}`);
-      push('空栏位数量随之减少', withTasks.emptyRows === 2, `空栏位=${withTasks.emptyRows}（5 栏 - 3 条）`);
+      push('空栏位数量随之减少', withTasks.emptyRows === 1, `空栏位=${withTasks.emptyRows}（4 栏 - 3 条）`);
 
       // 勾选第 2 栏 → 完成并删除
       await js('window.__petTest.memoComplete(1)');
@@ -679,11 +825,11 @@ async function runSelfCheck() {
       push('点击小方框＝完成任务并删除该栏',
         afterDone.count === 2 && !afterDone.tasks.includes('修 bug') && afterDone.removedTotal === 1,
         `剩余 ${afterDone.count} 条：${afterDone.tasks.join(' / ')}（累计删除 ${afterDone.removedTotal} 条）`);
-      push('删除后栏位重排且恢复空槽', afterDone.renderedRows === 5 && afterDone.emptyRows === 3,
+      push('删除后栏位重排且恢复空槽', afterDone.renderedRows === 4 && afterDone.emptyRows === 2,
         `渲染栏位=${afterDone.renderedRows} 空栏位=${afterDone.emptyRows}`);
 
       // 容量上限
-      // 超过默认 5 栏 → 不再拒绝，改为列表区域出现滚动
+      // 超过默认可见栏数 → 不再拒绝，改为列表区域出现滚动
       const beforeFill = await js('window.__petTest.memoSnapshot()');
       const fill = await js(`(() => {
         const r = [];
@@ -693,14 +839,14 @@ async function runSelfCheck() {
       await wait(250);
       const full = await js('window.__petTest.memoSnapshot()');
       const okCount = fill.filter((v) => v === true).length;
-      push('超过 5 条时全部接受（不再硬拒绝）', okCount === 12 && full.count === beforeFill.count + 12,
+      push('超过 4 条时全部接受（不再硬拒绝）', okCount === 12 && full.count === beforeFill.count + 12,
         `12 次添加全部成功（${okCount}/12），任务数 ${beforeFill.count} → ${full.count}`);
-      // 说明：两列布局下，8 条只排 4 行（103px）装得进 130px 容器，所以不会滚动；
-      // 真正触发滚动需要行数超过 5 行，即 11 条以上。
-      push('任务多到超过 5 行后列表自动可滚动', full.scrollable === true && full.maxScroll > 0,
+      // 说明：两列布局 + 88px 可视高（第 25 轮从 130px 让位给「和她说…」输入行）
+      // → 3 行装得下（6 条），第 7 条开始溢出滚动。
+      push('任务多到超过可见栏数后列表自动可滚动', full.scrollable === true && full.maxScroll > 0,
         `任务数=${full.count} scrollable=${full.scrollable} 内容高=${full.scrollHeight} 可视高=${full.clientHeight} 可滚动距离=${full.maxScroll}px`);
-      push('滚动区可视高度固定为 5 栏高度', full.clientHeight === 130,
-        `可视高度=${full.clientHeight}px（5 行 × 22px + 4 × 5px 间距 = 130px）`);
+      push('滚动区可视高度固定（不随任务数抖动）', full.clientHeight === 88,
+        `可视高度=${full.clientHeight}px（CSS 固定 88px；3 行 × 22px + 2 × 5px 间距 = 76px，留出半行提示"下面还有"）`);
 
       // 滚动后能露出后面的任务（注意量的是外层滚动容器 #memoScroll，不是内层网格）
       const scrolled = await js('window.__petTest.memoScrollTo(99999)');
@@ -723,20 +869,20 @@ async function runSelfCheck() {
         scrolled.scrollTop > 0 && scrolled.scrollTop === scrolled.maxScroll,
         `添加后 scrollTop=${scrolled.scrollTop} / maxScroll=${scrolled.maxScroll}`);
 
-      // 删除到 5 条 → 滚动条应消失（回到"默认装 5 栏"的样子）
+      // 删除到 4 条 → 正好填满默认可见栏数，不用滚动
       // 注意用同步删除：真实删除带 220ms 删除线动画，循环调用会互相打架
       const shrink = await js(`(() => {
         let guard = 0;
-        while (window.__petTest.memoSnapshot().count > 5 && guard++ < 60) window.__petTest.memoCompleteNow(0);
+        while (window.__petTest.memoSnapshot().count > 4 && guard++ < 60) window.__petTest.memoCompleteNow(0);
         return window.__petTest.memoSnapshot();
       })()`);
       await wait(300);
       const afterShrink = await js('window.__petTest.memoSnapshot()');
-      push('删到 5 条后滚动条消失（回到默认 5 栏）',
-        afterShrink.count === 5 && afterShrink.scrollable === false && afterShrink.maxScroll === 0,
+      push('删到 4 条后滚动条消失（回到默认可见栏数）',
+        afterShrink.count === 4 && afterShrink.scrollable === false && afterShrink.maxScroll === 0,
         `任务数=${afterShrink.count} scrollable=${afterShrink.scrollable} maxScroll=${afterShrink.maxScroll} 渲染栏位=${afterShrink.renderedRows}`);
-      push('5 条时正好占满可见区（不用滚动）', afterShrink.renderedRows >= 5 && afterShrink.clientHeight === 130,
-        `渲染栏位=${afterShrink.renderedRows}（5 条 + 空槽）可视高=${afterShrink.clientHeight}px`);
+      push('4 条时正好填满可见区（不用滚动）', afterShrink.renderedRows >= 4 && afterShrink.clientHeight === 88,
+        `渲染栏位=${afterShrink.renderedRows}（4 条）可视高=${afterShrink.clientHeight}px`);
 
       // 收起面板：窗口应还原尺寸
       const boundsBeforeClose = win.getBounds();
@@ -745,35 +891,79 @@ async function runSelfCheck() {
       const closedAgain = await js('window.__petTest.memoSnapshot()');
       const boundsAfterClose = win.getBounds();
       push('收起面板后还原窗口尺寸',
-        closedAgain.open === false && Math.abs(boundsAfterClose.width - WIN_W) <= 6 && Math.abs(boundsAfterClose.height - WIN_H) <= 6,
-        `窗口 ${boundsBeforeClose.width}x${boundsBeforeClose.height} → ${boundsAfterClose.width}x${boundsAfterClose.height}（设计 ${WIN_W}x${WIN_H}）`);
+        closedAgain.open === false && Math.abs(boundsAfterClose.width - closedWidth()) <= 6 && Math.abs(boundsAfterClose.height - WIN_H) <= 6,
+        `窗口 ${boundsBeforeClose.width}x${boundsBeforeClose.height} → ${boundsAfterClose.width}x${boundsAfterClose.height}（设计 ${closedWidth()}x${WIN_H} = 气泡列 ${BUBBLE_COL} + 面板列 ${panelWinW}）`);
 
       // 面板展开时窗口真的变宽了（否则面板会被裁掉）
       const bClosed = win.getBounds();
+      // 面板开合前后各量一次「桌宠屏幕位置」和「气泡左边界」：
+      //   桌宠必须一动不动（主人明确要求），气泡也必须一动不动（气泡列在两种状态下一样宽）
       const petScreenBefore = await js(`(() => {
         const r = document.getElementById('pet').getBoundingClientRect();
-        return { x: Math.round(window.screenX + r.left), y: Math.round(window.screenY + r.top) };
+        const b = document.getElementById('bubble').getBoundingClientRect();
+        return { x: Math.round(window.screenX + r.left), y: Math.round(window.screenY + r.top),
+                 rectLeft: Math.round(r.left), rectRight: Math.round(r.right),
+                 bubbleLeft: Math.round(b.left), bubbleTop: Math.round(b.top), vp: innerWidth };
       })()`);
+
       await js('window.__petTest.memoOpen()');
       await wait(800);
       const bOpen = win.getBounds();
       const geo = await js(`(() => {
         const r = document.getElementById('pet').getBoundingClientRect();
         const m = document.getElementById('memo').getBoundingClientRect();
+        const s = document.querySelector('.scene');
         return { petX: Math.round(window.screenX + r.left), petY: Math.round(window.screenY + r.top),
+                 rectLeft: Math.round(r.left), rectRight: Math.round(r.right), screenX: window.screenX,
                  panelLeft: Math.round(m.left), panelRight: Math.round(m.right),
                  panelTop: Math.round(m.top), panelBottom: Math.round(m.bottom),
                  panelW: Math.round(m.width),
-                 vp: [window.innerWidth, window.innerHeight],
-                 sceneClass: document.querySelector('.scene').className };
+                 cols: getComputedStyle(s).gridTemplateColumns,
+                 bubbleLeft: Math.round(document.getElementById('bubble').getBoundingClientRect().left),
+                 bubbleRight: Math.round(document.getElementById('bubble').getBoundingClientRect().right),
+                 petRectW: Math.round(r.width), vp: [window.innerWidth, window.innerHeight],
+                 sceneClass: s.className };
       })()`);
+      logInput({ src: 'selftest', type: 'pet-after',
+        detail: `展开态：窗口=${bOpen.x}+${bOpen.width} 桌宠 rect=[${geo.rectLeft},${geo.rectRight}] → 屏幕 x=${geo.petX}`
+          + `｜面板 rect=[${geo.panelLeft},${geo.panelRight}] 气泡左=${geo.bubbleLeft} 视口=${geo.vp[0]}` });
       const maskOpenState = clickThrough.getState();
-      push('面板展开时窗口横向变宽', bOpen.width > bClosed.width + 200,
-        `${bClosed.width}x${bClosed.height} → ${bOpen.width}x${bOpen.height}`);
+
+      // 第 27 轮起：展开态比收起态**多一条面板列**（气泡列 + 面板列 + 桌宠列），
+      // 窗口右边界不动、只往左长 → 桌宠不动。所以断言改成"右边界不变 + 面板在窗口内完整显示 + 多出来的宽度正好是面板列"。
+      push('面板展开时窗口变宽（多出一条面板列，右边界不动）',
+        bOpen.width > bClosed.width + 200 && Math.abs((bOpen.x + bOpen.width) - (bClosed.x + bClosed.width)) <= 2,
+        `${bClosed.width}x${bClosed.height}@右${bClosed.x + bClosed.width} → ${bOpen.width}x${bOpen.height}@右${bOpen.x + bOpen.width}`
+        + `（设计 收起 ${closedWidth()} = 桌宠 ${PET_COL} + 气泡列 ${BUBBLE_COL}；展开 ${openWidth()} 再多一条面板列 ${panelWinW}）`);
+      // ⚠️ 第 29 轮按主人反馈改了：面板**不再钉在窗口最左边**，而是**紧贴她的左边**
+      //    （原话："面板飞到左边去了，紧贴人物左边不重合就行"）。
+      //    所以这里量的是"面板右边界 vs 她左边界"的间隙：要小（贴着她）但不能重叠（< 0）。
+      push('面板紧贴她的左边（不重叠、也不飞到窗口最左边）', (() => {
+        const gap = geo.rectLeft - geo.panelRight;        // 她左边界 - 面板右边界
+        return gap >= -2 && gap <= 20
+          && geo.rectRight >= geo.vp[0] - 3 && geo.rectRight <= geo.vp[0] + 3
+          && geo.bubbleLeft >= geo.panelRight - 1 && geo.bubbleLeft >= 0 && geo.bubbleRight <= geo.vp[0] + 3;
+      })(), `面板 x=[${geo.panelLeft},${geo.panelRight}]，她左边界=${geo.rectLeft} → 间隙=${geo.rectLeft - geo.panelRight}px（贴着她、不重叠）`
+        + `；她 rect=[${geo.rectLeft},${geo.rectRight}] 宽=${geo.petRectW}（贴右，窗口宽 ${geo.vp[0]}）`
+        + `；气泡=[${geo.bubbleLeft},${geo.bubbleRight}]`);
       // ★ 主人明确要求：点击后是"在右边生成面板"，人物本身不该移动
       const petMoved = Math.max(Math.abs(geo.petX - petScreenBefore.x), Math.abs(geo.petY - petScreenBefore.y));
+      // 布局取证：一行看清"网格列 + 各元素矩形"（排查人物/气泡被挤偏时不用猜）
+      {
+        const lp = await js('window.__petTest.layoutProbe()');
+        logInput({ src: 'selftest', type: 'layout',
+          detail: `视口=${lp.vp} 列=[${lp.cols}] scene=[${lp.scene}] --bubble-w=${lp.bubbleVar} --sprite-w=${lp.spriteVar} class=${lp.sceneClass}`
+            + `｜子元素=${JSON.stringify(lp.kids)}｜memo样式=${JSON.stringify(lp.memoStyle)}` });
+      }
       push('★面板展开时桌宠屏幕位置不动（主人要求）', petMoved <= 4,
         `桌宠屏幕位置 (${petScreenBefore.x},${petScreenBefore.y}) → (${geo.petX},${geo.petY})，偏移 ${petMoved}px`);
+      // 气泡要跟着她走：收起时在她左上角，面板打开后跟着她挪到右上角（不是被丢在窗口角落）
+      const bubbleMoved = Math.abs(geo.bubbleLeft - petScreenBefore.bubbleLeft);
+      const bubbleBesidePet = Math.abs(geo.bubbleLeft - (geo.rectRight + 8)) <= 14 || geo.bubbleLeft >= geo.panelRight - 1;
+      push('气泡跟着人物走：收起在她左上角 → 面板打开后挪到她右上角（依旧贴着她）',
+        bubbleMoved > 100 && bubbleBesidePet && geo.bubbleLeft >= 0,
+        `气泡左边界 ${petScreenBefore.bubbleLeft} → ${geo.bubbleLeft}（人物右边界 ${geo.rectRight}，面板右边界 ${geo.panelRight}）`
+        + `；也就是从"她左上角"换到"她右上角"，不是丢在窗口角落`);
       push('面板完整落在窗口内（不被裁掉）', geo.panelLeft >= 0 && geo.panelRight <= geo.vp[0] && geo.panelW >= 280,
         `面板 x=[${geo.panelLeft},${geo.panelRight}] 宽=${geo.panelW} 视口宽=${geo.vp[0]}`);
       push('窗口变宽后仍在工作区内', (() => {
@@ -1047,7 +1237,7 @@ async function runInteractionTest() {
   const menuBefore = menuLog.opened;
   const realMenu = await js('window.__petTest.realContextMenu()');
   trace('realContextMenu后');
-  await wait(200);
+  await wait(150);
   push('右键事件被 renderer 捕获并阻止默认行为', realMenu.fired === true && realMenu.defaultPrevented === true,
     `count=${realMenu.count} from=${realMenu.from} defaultPrevented=${realMenu.defaultPrevented}`);
   push('右键已送达主进程（IPC 通路）', menuLog.opened === menuBefore + 1,
@@ -1096,6 +1286,59 @@ async function runInteractionTest() {
     `每轮 ${realSizes.join(' → ')}；起点 ${originBounds.width}x${originBounds.height}；最大偏差 ${maxDelta}px（>2 视为漂移失控）`);
   trace('真实拖动3轮后');
 
+    // 描边：数值已按主人调好的固化（0.25px / 62%），调试横条已拆掉
+    {
+      const olState = await js('window.__petTest.state()');
+      const ol = (olState.sprite && olState.sprite.outline) || {};
+      // ① 固化值 + 调试横条/入口都拆干净了（跟当初调速滑条一个流程）
+      const leftovers = await js(`(() => ({
+        row: !!document.getElementById('outlineRow'),
+        w: !!document.getElementById('outlineWidth'),
+        d: !!document.getElementById('outlineDepth'),
+        setter: typeof window.__petTest.setOutline,
+      }))()`);
+      push('描边参数已固化（粗细 0.25px / 深浅 62% / 线色 rgb(97,97,97)）',
+        Math.abs(ol.width - 0.25) < 0.001 && ol.depth === 62 && ol.color === 'rgb(97,97,97)',
+        `粗细=${ol.width}px 深浅=${ol.depth}% 线色=${ol.color} 外轮廓=${ol.ring}px`);
+      push('描边调试横条已拆除（临时模块清理干净）',
+        leftovers.row === false && leftovers.w === false && leftovers.d === false && leftovers.setter === 'undefined',
+        `#outlineRow=${leftovers.row} #outlineWidth=${leftovers.w} #outlineDepth=${leftovers.d}`
+        + ` __petTest.setOutline=${leftovers.setter}`);
+      // ② 部件线掩码（头发/眉毛/手/腿脚）已经接进来了
+      push('部件描边掩码已接入（头发/眉毛/手/裙子外层/腿脚）',
+        (ol.groupsWithEdges || []).length >= 3,
+        `带掩码的动作组=[${(ol.groupsWithEdges || []).join(', ')}]；外轮廓=${ol.ring}px；`
+        + `已缓存掩码层=${ol.masks} 剪影=${ol.silhouettes}`);
+      // ③ 外轮廓像素取证：取样点最外侧必须是当前线色（颜色从状态里读，不写死）
+      const lc = (ol.color || 'rgb(97,97,97)').match(/\d+/g).map(Number);
+      const probe = await js(`(() => {
+        const c = document.getElementById('sprite');
+        if (!c) return { hits: 0, samples: [], size: '无' };
+        const g = c.getContext('2d'), W = c.width, H = c.height;
+        const d = g.getImageData(0, 0, W, H).data;
+        const at = (x, y) => (y * W + x) * 4;
+        const LR = ${lc[0]}, LG = ${lc[1]}, LB = ${lc[2]};
+        let hits = 0; const samples = [];
+        for (let y = 0; y < H; y++) {
+          for (let x = 10; x < W - 3; x++) {
+            const i = at(x, y), j = at(x + 3, y), k = at(x - 8, y);
+            if (d[i + 3] < 200) continue;
+            if (d[j + 3] > 20) continue;
+            if (d[k + 3] < 200) continue;
+            const outOk = Math.abs(d[i] - LR) <= 26 && Math.abs(d[i + 1] - LG) <= 26 && Math.abs(d[i + 2] - LB) <= 26;
+            const inLum = d[k] * 0.299 + d[k + 1] * 0.587 + d[k + 2] * 0.114;
+            if (!outOk || inLum < 150) continue;   // 最外是线色、内侧原本是亮色（不是原画自带的黑边）
+            hits++; if (samples.length < 4) samples.push(x + ',' + y);
+          }
+        }
+        return { hits, samples, size: W + 'x' + H };
+      })()`);
+      push('每一帧都套用描边，且描边真的画在轮廓上（画布像素取证）',
+        ol.width > 0 && probe.hits >= 8,
+        `描边=${ol.color} 粗细=${ol.width}px 外轮廓=${ol.ring}px；`
+        + `画布 ${probe.size} 上"亮色轮廓 + 外侧描边"的取样点 ${probe.hits} 个（例：${(probe.samples || []).join(' / ')}）`);
+    }
+
   // mousedown 之后立刻右键：如果 mousedown 里还有 preventDefault，contextmenu 会被抑制
   const menuBefore2 = menuLog.opened;
   const mdThenMenu = await js(`(() => {
@@ -1114,7 +1357,7 @@ async function runInteractionTest() {
       defaultPrevented: ev.defaultPrevented,
     };
   })()`);
-  await wait(200);
+  await wait(150);
   push('左键按下后紧接右键仍能打开菜单（根因②回归）',
     mdThenMenu.handled === true && mdThenMenu.mousedownPrevented === false && menuLog.opened === menuBefore2 + 1,
     `mousedown 被阻止=${mdThenMenu.mousedownPrevented}（必须为 false）菜单次数 ${menuBefore2} → ${menuLog.opened}`);
@@ -1134,10 +1377,16 @@ async function runInteractionTest() {
   // 模板可独立验证（不能真的 popup，会阻塞自检）
   const tpl = buildMenuTemplate();
   const labels = tpl.filter((i) => i.label).map((i) => i.label);
-  push('菜单项完整', labels.length >= 7 && labels.some((l) => l.includes('摸头')),
+  const hasLabel = (s) => labels.some((l) => l.includes(s));
+  push('菜单项符合本轮设计（开心 / 摸头 / 设置 / 回到底部右侧 / 开发者工具 / 退出）',
+    labels.length === 7 && hasLabel('开心') && hasLabel('摸头') && hasLabel('设置')
+    && hasLabel('回到底部右侧') && hasLabel('开发者工具') && hasLabel('退出'),
     `共 ${labels.length} 项: ${labels.join(' / ')}`);
+  push('已下架的菜单项不再出现（永远置顶 / 喂白饭 / 让她说句话）',
+    !hasLabel('永远置顶') && !hasLabel('喂白饭') && !hasLabel('让她说句话'),
+    `模板里没有这三项 → ${labels.join(' / ')}`);
   const clickables = tpl.filter((i) => typeof i.click === 'function').length;
-  push('菜单项都绑定了动作', clickables >= 7, `可点击项 ${clickables}`);
+  push('菜单项都绑定了动作', clickables === 6, `可点击项 ${clickables}（标题项之外全都要有 click）`);
 
   // 兜底入口：Ctrl+M（不依赖鼠标，万一物理右键进不来也有办法开菜单）
   // 注意：面板打开时输入框会接收键盘输入并 stopPropagation（避免打字误触全局快捷键），
@@ -1146,7 +1395,7 @@ async function runInteractionTest() {
   await wait(700);
   const kbBefore = menuLog.opened;
   const kb = await js('window.__petTest.keyboardMenu()');
-  await wait(200);
+  await wait(150);
   push('Ctrl+M 兜底入口可用（面板收起时）', kb.from === 'keyboard' && menuLog.opened === kbBefore + 1,
     `来源=${kb.from} 菜单次数 ${kbBefore} → ${menuLog.opened}`);
 
@@ -1155,7 +1404,7 @@ async function runInteractionTest() {
   await wait(600);
   const menuBeforeInPanel = menuLog.opened;
   const kbInPanel = await js('window.__petTest.keyboardMenu(true)');
-  await wait(200);
+  await wait(150);
   const memoStillOpen = await js('window.__petTest.memoSnapshot()');
   push('面板打开时键盘输入被输入框接管（不误触全局菜单）',
     kbInPanel.delta === 0 && kbInPanel.dispatchedOn === 'memoInput' &&
@@ -1169,41 +1418,85 @@ async function runInteractionTest() {
 
   // 交互中窗口应保持稳定
   const b2 = trace('全部交互后');
-  push('交互后窗口未跑位', Math.abs(b2.width - WIN_W) <= 6 && Math.abs(b2.height - WIN_H) <= 6 && win.isVisible(),
-    `bounds=${b2.width}x${b2.height} visible=${win.isVisible()}`);
+  push('交互后窗口未跑位', Math.abs(b2.width - closedWidth()) <= 6 && Math.abs(b2.height - WIN_H) <= 6 && win.isVisible(),
+    `bounds=${b2.width}x${b2.height}（设计 ${closedWidth()}x${WIN_H}）visible=${win.isVisible()}`);
 
-  // ---------- 鼠标靠近（主人要求：点击被待办面板占用，所以靠近用鼠标移入触发） ----------
+  // ---------- 鼠标靠近（主人 2026-09-27 定的规矩：**必须悬停 0.3 秒才播触碰动画**） ----------
   {
     const hoverBefore = await js('window.__petTest.state()');
     const spB = hoverBefore.sprite || {};
     if (spB.available && (spB.groups || []).includes('hover')) {
-      const r = await js(`(() => {
-        const el = document.getElementById('sprite');
-        const b = el.getBoundingClientRect();
-        return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2),
-                 outX: 2, outY: 2 };
-      })()`);
+      const SOLID = await js('window.__petTest.solidPoint()');   // 她身上真画了东西的点
+      const r = { x: SOLID && SOLID.ok ? SOLID.clientX : 0, y: SOLID && SOLID.ok ? SOLID.clientY : 0 };
       // 先移出（确保从"离开"状态开始，避免初始化时鼠标恰好已在角色上导致基线不准）
-      // 用动态算出的"角色外一点"（y 取角色上边 -30），不要用写死的角落坐标
-      const outPos = await js(`(() => { const b = document.getElementById('sprite').getBoundingClientRect();
-        return { x: Math.round(b.left + b.width / 2), y: Math.max(0, Math.round(b.top) - 30) }; })()`);
+      const outPos = await js(`(() => { const sp = window.__petTest.emptyPoint ? window.__petTest.emptyPoint() : null;
+        const b = document.getElementById('sprite').getBoundingClientRect();
+        return sp && sp.ok ? { x: sp.clientX, y: sp.clientY }
+          : { x: Math.max(0, Math.round(b.left - 20)), y: Math.max(0, Math.round(b.top)) }; })()`);
       await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${outPos.x}, clientY: ${outPos.y} }))`);
       await wait(300);
       const out0 = await js('window.__petTest.state()');
-      // 再移入角色
+
+      // ① 只悬停 150ms（不到 0.3 秒）→ **不许**播「靠近」
       await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${r.x}, clientY: ${r.y} }))`);
-      await wait(250);
+      await wait(150);
+      const early = await js('window.__petTest.state()');
+      push('鼠标刚靠近（不到 0.3 秒）**不播**触碰动画（鼠标一扫而过不打扰她）',
+        early.sprite.hovering === false
+        && (!early.sprite.timeline || early.sprite.timeline.group === early.sprite.baseGroup)
+        && early.sprite.hoverEnters === out0.sprite.hoverEnters,
+        `悬停 200ms 时：hovering=${early.sprite.hovering} 当前动作=${early.sprite.timeline ? early.sprite.timeline.group : 'null'}`
+        + ` 待机=${early.sprite.baseGroup} enters=${early.sprite.hoverEnters}（基线 ${out0.sprite.hoverEnters}）`
+        + ` 定时器等待中=${early.sprite.hoverDelay ? early.sprite.hoverDelay.waiting : '?'}`);
+
+      // ② 停够 0.3 秒 → 播「靠近」
+      await wait(300);   // 150 + 300 = 450ms > 300ms
       const inState = await js('window.__petTest.state()');
-      push('鼠标移入角色 → 切到「靠近」动作',
+      push('悬停满 0.3 秒 → 切到「靠近」动作',
         inState.sprite.hovering === true && inState.sprite.hoverEnters === out0.sprite.hoverEnters + 1
-        && inState.sprite.timeline && inState.sprite.timeline.group === 'hover',
-        `移出基线 enters=${out0.sprite.hoverEnters} → 移入后 ${inState.sprite.hoverEnters}；`
-        + `hovering=${inState.sprite.hovering} 当前动作=${inState.sprite.timeline ? inState.sprite.timeline.group : 'null'}`);
-      // 移出角色（同样用动态算出的"角色外一点"）
+        && inState.sprite.timeline && inState.sprite.timeline.group === 'hover'
+        && inState.sprite.hoverDelay && inState.sprite.hoverDelay.delays >= 1,
+        `移出基线 enters=${out0.sprite.hoverEnters} → 悬停满后 ${inState.sprite.hoverEnters}；`
+        + `hovering=${inState.sprite.hovering} 当前动作=${inState.sprite.timeline ? inState.sprite.timeline.group : 'null'}`
+        + ` 延时设置=${inState.sprite.hoverDelay ? inState.sprite.hoverDelay.ms : '?'}ms`
+        + ` 真正触发次数=${inState.sprite.hoverDelay ? inState.sprite.hoverDelay.delays : '?'}`);
+
+      // ③ 悬停中途移开 → 作废（不播）+ 立刻回待机
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${outPos.x}, clientY: ${outPos.y} }))`);
+      await wait(300);
+      const out1 = await js('window.__petTest.state()');
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${r.x}, clientY: ${r.y} }))`);
+      await wait(150);
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${outPos.x}, clientY: ${outPos.y} }))`);
+      await wait(300);
+      const aborted = await js('window.__petTest.state()');
+      push('悬停没满 0.3 秒就移开 → 不播「靠近」，立刻回待机',
+        aborted.sprite.hovering === false
+        && aborted.sprite.timeline && aborted.sprite.timeline.group === aborted.sprite.baseGroup
+        && aborted.sprite.hoverDelay && aborted.sprite.hoverDelay.cancels >= 1,
+        `第一次移出后：hovering=${out1.sprite.hovering}；`
+        + `"进 200ms 就退"之后：hovering=${aborted.sprite.hovering}`
+        + ` 当前动作=${aborted.sprite.timeline ? aborted.sprite.timeline.group : 'null'}`
+        + ` 中途作废次数=${aborted.sprite.hoverDelay ? aborted.sprite.hoverDelay.cancels : '?'}`);
+
+      // ④ 再停够 0.3 秒 → 动作回来（确认"作废"之后还能正常触发）
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${r.x}, clientY: ${r.y} }))`);
+      await wait(450);
+      const again = await js('window.__petTest.state()');
+      push('作废之后重新悬停 0.3 秒 → 「靠近」动作照常触发',
+        again.sprite.hovering === true && again.sprite.timeline && again.sprite.timeline.group === 'hover',
+        `hovering=${again.sprite.hovering} 当前动作=${again.sprite.timeline ? again.sprite.timeline.group : 'null'}`);
+
+      // 趁「靠近」动作正显示着抓一张图：主人说过"白蝴蝶不要描"，这张就是给他核对用的
+      {
+        const img = await win.webContents.capturePage();
+        fs.writeFileSync(path.join(ARTIFACTS, 'shot-hover.png'), img.toPNG());
+      }
+      // 移出角色 → 立刻回待机
       await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${outPos.x}, clientY: ${outPos.y} }))`);
       await wait(400);
       const outState = await js('window.__petTest.state()');
-      push('鼠标移出 → 回到待机动作',
+      push('鼠标移出 → 立刻回到待机动作',
         outState.sprite.hovering === false && outState.sprite.timeline && outState.sprite.timeline.group === outState.sprite.baseGroup,
         `hovering=${outState.sprite.hovering} 当前动作=${outState.sprite.timeline ? outState.sprite.timeline.group : 'null'} 待机=${outState.sprite.baseGroup} 离开次数 ${outState.sprite.hoverExits}`);
     } else {
@@ -1213,22 +1506,107 @@ async function runInteractionTest() {
 
   // ---------- 菜单动作 → 交互动作组（主人把 1/5/6 分给"交互"） ----------
   {
-    // 统一的"鼠标移出/移入"动作：**动态算坐标**，不用写死的 (2,2) ——
-    // 角色矩形实测是 [40,12,171,227]，(2,2) 距上边只有 2px，闸值太脆。
-    const OUT_POS = { x: 1, y: 0 };
+    // 统一的"鼠标移出/移入"动作：**动态算坐标**
+    // ⚠️ 第 27 轮把"靠近"判定从矩形改成逐像素之后，移出点不能再随便取（比如 (1,0) 在细长构图下
+    //    可能仍在角色身上）。OFF_POINT 由渲染层算：角色矩形内**没有实体像素**的那个角。
+    const OFF_POINT = await js(`(() => {
+      const sp = window.__petTest.emptyPoint ? window.__petTest.emptyPoint() : null;
+      if (sp && sp.ok) return { x: sp.clientX, y: sp.clientY, why: '角色矩形内的空气点' };
+      const b = document.getElementById('pet').getBoundingClientRect();
+      return { x: Math.max(0, Math.round(b.left + 2)), y: Math.max(0, Math.round(b.top + 2)), why: '兜底：矩形左上角' };
+    })()`);
     const hoverOut = async () => {
-      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${OUT_POS.x}, clientY: ${OUT_POS.y} }))`);
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${OFF_POINT.x}, clientY: ${OFF_POINT.y} }))`);
       await wait(260);
     };
     const hoverIn = async () => {
-      const c = await js(`(() => { const b = document.getElementById('sprite').getBoundingClientRect();
-        return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; })()`);
-      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${c.x}, clientY: ${c.y} }))`);
-      await wait(200);
+      // ⚠️ 必须移到**角色身上确实画了东西**的点：第 27 轮把"靠近"判定从矩形改成逐像素之后，
+      //    矩形中心可能正好是空气（脸上的空隙），合成事件移到那儿就不再算"靠近"了。
+      const p = await js('window.__petTest.solidPoint()');
+      if (p && p.ok && p.selfCheck !== true) {
+        // 自证失败 = 坐标映射有偏差（像素判定和 solidPoint 对不上），记一条免得以后查半天
+        logInput({ src: 'selftest', type: 'solid-point', detail: `⚠️ 实体点自判失败：${JSON.stringify(p)}` });
+      }
+      if (!p || !p.ok) {
+        const c = await js(`(() => { const b = document.getElementById('sprite').getBoundingClientRect();
+          return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; })()`);
+        await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${c.x}, clientY: ${c.y} }))`);
+        await wait(150);
+        return;
+      }
+      await js(`window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: ${p.clientX}, clientY: ${p.clientY} }))`);
+      // ⚠️ 主人 2026-09-27 定了"悬停 0.3 秒才播触碰动画"，所以这里必须等够 0.3 秒
+      //    （原来只等 200ms，断言会因为"延时还没到"而红）
+      await wait(450);
     };
 
     const before = await js('window.__petTest.state()');
     const spA = before.sprite || {};
+
+    // ---------- 回归：鼠标移进她身上后，**往下 / 往右**移开也要回待机（主人 2026-09-25 反馈） ----------
+    // 为什么单独测这两个方向：往左上移开时鼠标会离开整个窗口（渲染层能收到 mouseleave），
+    // 而往下/往右移开会落在**窗口内的透明区**——那时窗口刚好切回穿透态，
+    // mousemove 可能就此断掉，动作就卡在「靠近」的最后一帧上。
+    if (spA.available && (spA.groups || []).includes('hover')) {
+      const dirs = [
+        { name: '往下', x: 'cx', y: 'belowBottom', desc: '角色下边界 +15px' },
+        { name: '往右', x: 'leftMinus', y: 'cy', desc: '角色左边界 -15px（窗口内、且肯定在角色外）' },
+      ];
+      // 这一组要验的正是**兜底心跳**本身：先把事件路径"掐掉"（只设状态、不发 mousemove），
+      // 再打开兜底，看它能不能靠"主动问鼠标在哪"把动作复原。
+      // 这就是真机上的场景：鼠标移开后窗口切回穿透态，渲染层再也收不到 mousemove。
+      //
+      // ⚠️ 顺序坑（人家白红了两轮）：兜底心跳看的是**真鼠标**，而自检用的是合成事件
+      //    （真鼠标在屏幕别处）→ 一打开兜底，它就会把"刚设好的 hover"立刻改回待机。
+      //    所以"移入后 hovering=true"这个观测必须在**打开兜底之前**拿到。
+      const preHover = await (async () => { await hoverIn(); return js('window.__petTest.state()'); })();
+      await hoverOut();
+      await js('window.__petTest.setHoverWatchdog(true)');
+      for (const d of dirs) {
+        await hoverIn();
+        const inNow = { sprite: { hovering: preHover.sprite.hovering } };   // 用兜底打开前的观测（见上）
+        // 再往指定方向移开一点点（仍在窗口内）。
+        // ⚠️ 这里**故意不发 mousemove**：模拟"穿透态下事件断了"，只让兜底心跳去发现。
+        // ⚠️ 坐标口径要和主进程 getCursor 报的完全一致（都用 #pet 自身的矩形 + 窗口左上角），
+        //    不然"移开点"会落在角色里，兜底判定永远 inside=true（人家第一版就是这么白跑的）。
+        const pos = await js(`(() => {
+          const sp = window.__petTest.solidPoint();
+          const b = document.getElementById('pet').getBoundingClientRect();
+          const cx = sp.ok ? sp.clientX : Math.round(b.left + b.width / 2);
+          const cy = sp.ok ? sp.clientY : Math.round(b.top + b.height / 2);
+          const sr = document.getElementById('sprite').getBoundingClientRect();
+          const scene = document.querySelector('.scene');
+          const vw = innerWidth, vh = innerHeight;
+          // 往下：角色下边界 +15（夹在窗口内）；往右：改用"角色左边 -15" ——
+          // 因为窗口右边界就贴着角色右边（就差 1px），往右根本出不去，
+          // 用左边同样能验证"横向移开"，而且是真·角色外。
+          const belowBottom = Math.min(vh - 1, Math.round(b.bottom + 15));
+          const leftMinus = Math.max(0, Math.round(b.left - 15));
+          const rightSide = Math.min(vw - 1, Math.round(b.right + 15));
+          return { cx, cy, belowBottom, leftMinus, rightSide, vw, vh,
+                   paintedPixels: sp.painted || 0,
+                   petRect: [Math.round(b.left), Math.round(b.top), Math.round(b.right), Math.round(b.bottom)] };
+        })()`);
+        const tx = d.x === 'leftMinus' ? pos.leftMinus : pos.cx;
+        const ty = d.y === 'belowBottom' ? pos.belowBottom : pos.cy;
+        // 把"主进程看到的鼠标位置"换成移开后的点（窗口内坐标，自检专用）
+        win.__fakeCursor = { x: tx, y: ty };
+        await wait(900);   // 兜底心跳 250ms 一次，给足 3 次机会
+        const st = await js('window.__petTest.state()');
+        win.__fakeCursor = null;
+        const wd = st.sprite.hoverWatchdog || {};
+        push(`鼠标靠近后${d.name}移开 → 回到待机动作（事件断了也有兜底）`,
+          inNow.sprite.hovering === true && st.sprite.hovering === false
+          && st.sprite.timeline && st.sprite.timeline.group === st.sprite.baseGroup && (wd.fixes || 0) >= 1,
+          `移入点=(${pos.cx},${pos.cy})（角色身上的实体像素）→ 移入后 hovering=${inNow.sprite.hovering}；`
+          + `移开点=(${tx},${ty})（${d.desc}，且**故意不发 mousemove**）→ hovering=${st.sprite.hovering}`
+          + ` 当前动作=${st.sprite.timeline ? st.sprite.timeline.group : 'null'} 待机=${st.sprite.baseGroup}`
+          + `；兜底心跳 运行${wd.ticks || 0}次 修正${wd.fixes || 0}次`
+          + `（逐像素位图 ${pos.paintedPixels || '?'} 个实体像素）`);
+      }
+      await js('window.__petTest.setHoverWatchdog(false)');
+      await hoverOut();
+    }
     if (spA.available && (spA.groups || []).includes('interact')) {
       await hoverOut();
       const outBase = await js('window.__petTest.state()');
@@ -1258,15 +1636,67 @@ async function runInteractionTest() {
       push('逐帧采样确认摸头播放了「交互」组', seen.includes('interact'),
         `80ms 间隔采样 6 次: ${seen.join(' → ')}`);
       await wait(1200);
-      // 喂白饭也走交互组（同样要立刻检查）
+      // 「开心」= 一组循环动画（主人 2026-09-24 把待机动画换到了开心上），
+      // 点一次进入"保持"（一直循环播），再点一次才退出
       await hoverOut();
-      win.webContents.send('pet:action', 'rice');
-      await wait(120);
-      const afterRice = await js('window.__petTest.state()');
-      push('喂白饭 → 也播放「交互」动作组',
-        afterRice.sprite.timeline && afterRice.sprite.timeline.group === 'interact',
-        `当前动作=${afterRice.sprite.timeline ? afterRice.sprite.timeline.group : 'null'} 气泡="${(afterRice.bubbleText || '').slice(0, 20)}"`);
-      await wait(1600);
+      win.webContents.send('pet:action', 'happy');
+      await wait(150);
+      const afterHappy = await js('window.__petTest.state()');
+      const happyTl = afterHappy.sprite.timeline || {};
+      push('右键「开心」 → 播放专属「happy」素材组',
+        happyTl.group === 'happy' && afterHappy.bubbleShown === true,
+        `当前动作=${happyTl.group || 'null'} 气泡="${(afterHappy.bubbleText || '').slice(0, 20)}"`
+        + ` 可用动作=[${(afterHappy.sprite.groups || []).join(', ')}]`);
+      push('「开心」进入保持状态（poseGroup=happy，loop 循环不自动收尾）',
+        afterHappy.sprite.poseGroup === 'happy' && happyTl.loop === true,
+        `poseGroup=${afterHappy.sprite.poseGroup || 'null'} loop=${happyTl.loop}`);
+      // 趁保持期间抓一张图：主人能直接看到「开心」素材在窗口里长什么样、多大
+      // （人家看不见图时，"素材到底渲染成什么"只能靠这张自证）
+      {
+        const img = await win.webContents.capturePage();
+        fs.writeFileSync(path.join(ARTIFACTS, 'shot-happy.png'), img.toPNG());
+        const hp = await js(`(() => {
+          const c = document.getElementById('sprite');
+          const r = c.getBoundingClientRect();
+          return { w: c.width, h: c.height, cssW: Math.round(r.width), cssH: Math.round(r.height) };
+        })()`);
+        push('抓「开心」保持中的截图供主人目视确认',
+          fs.existsSync(path.join(ARTIFACTS, 'shot-happy.png')) && hp.w > 0,
+          `artifacts/shot-happy.png；画布 ${hp.w}x${hp.h}（CSS ${hp.cssW}x${hp.cssH}）`);
+      }
+      // ① 关键：等久一点也**不许自动退出**（原来 1 秒就回待机了，主人要的就是别退）
+      await wait(2200);
+      const stillHappy = await js('window.__petTest.state()');
+      const stillGroup = (stillHappy.sprite.timeline || {}).group || null;
+      push('保持动作不会自动退出（2.2 秒后仍在 happy）',
+        stillGroup === 'happy' && stillHappy.sprite.poseGroup === 'happy',
+        `当前动作=${stillGroup} poseGroup=${stillHappy.sprite.poseGroup || 'null'}`);
+      // ② 鼠标划过她身上也不能把姿势顶掉（否则"保持"等于没做）
+      await hoverIn();
+      await wait(400);
+      const hoveredDuring = await js('window.__petTest.state()');
+      push('保持动作期间鼠标移到她身上也不会被「靠近」顶掉',
+        ((hoveredDuring.sprite.timeline || {}).group) === 'happy',
+        `当前动作=${(hoveredDuring.sprite.timeline || {}).group || 'null'} hovering=${hoveredDuring.sprite.hovering}`);
+      await hoverOut();
+      await wait(150);
+      // ③ 主进程菜单要跟着打勾（勾选状态由渲染层回报）
+      const happyItemOn = buildMenuTemplate().find((i) => i.label && i.label.includes('开心'));
+      push('菜单「开心」是勾选项，且保持中显示为已勾选',
+        happyItemOn && happyItemOn.type === 'checkbox' && happyItemOn.checked === true,
+        `type=${happyItemOn && happyItemOn.type} checked=${happyItemOn && happyItemOn.checked}`);
+      // ④ 再点一次 → 退出保持，回待机
+      win.webContents.send('pet:action', 'happy');
+      await wait(400);
+      const afterOff = await js('window.__petTest.state()');
+      const offGroup = (afterOff.sprite.timeline || {}).group || null;
+      push('再点一次「开心」 → 退出保持，回到待机',
+        afterOff.sprite.poseGroup === null && offGroup !== 'happy',
+        `当前动作=${offGroup} poseGroup=${afterOff.sprite.poseGroup || 'null'} 待机=${afterOff.sprite.baseGroup}`);
+      const happyItemOff = buildMenuTemplate().find((i) => i.label && i.label.includes('开心'));
+      push('退出保持后菜单勾选也取消',
+        happyItemOff && happyItemOff.checked === false,
+        `checked=${happyItemOff && happyItemOff.checked}`);
       // 鼠标停在角色上时，交互播完的落点：应该是「靠近」或「待机」，**不能卡在交互上**
       // （这条断言原来写死"必须停在 hover"，但鼠标位置会受窗口位置影响，不稳定；
       //   它真正要保证的是"不会卡住 + 会回到可循环状态"，所以改成这个说法）
@@ -1294,8 +1724,174 @@ async function runInteractionTest() {
   {
     const b = win.getBounds();
     push('全部交互测试结束后窗口回到设计尺寸',
-      Math.abs(b.width - WIN_W) <= 6 && Math.abs(b.height - WIN_H) <= 6,
-      `bounds=${b.width}x${b.height} 设计=${WIN_W}x${WIN_H}`);
+      Math.abs(b.width - closedWidth()) <= 6 && Math.abs(b.height - WIN_H) <= 6,
+      `bounds=${b.width}x${b.height} 设计=${closedWidth()}x${WIN_H}`);
+  }
+
+  // ---------- API 接入（第 25 轮） ----------
+  // 这一组断言里**一条真实 API 调用都没有** —— 自检必须离线可跑，
+  // 更不能拿主人的密钥去花钱、去撞限流。覆盖的点是"配没配得上、密钥会不会漏、
+  // 各家错误有没有台词、界面这条路通不通"。
+  {
+    const cfgPath = apiConfig.getConfigPath();
+    const cfgObj = apiConfig.load();
+    push('API 设置存在用户数据目录（便携版与安装版共用同一份）',
+      cfgPath.startsWith(app.getPath('userData')) && cfgPath.endsWith('api-config.json'),
+      `${cfgPath}（默认地址=${cfgObj.baseUrl} 默认模型=${cfgObj.model}）`);
+
+    // ★ 反向断言：密钥**绝不能**出现在渲染层能拿到的任何东西里
+    const view = apiConfig.publicView(cfgObj);
+    const serialized = JSON.stringify(view);
+    push('密钥不会外泄：设置的安全视图里没有可用的密钥',
+      view.apiKey === undefined && !('apiKey' in view)
+      && (!cfgObj.apiKey ? view.maskedKey === '' : (view.maskedKey.includes('•') && !serialized.includes(cfgObj.apiKey))),
+      `hasKey=${view.hasKey} maskedKey="${view.maskedKey}"（只在需要时才解密使用，从不发给渲染层）`);
+
+    // ⚠️ 必须先把面板展开再量：面板 display:none 时 getBoundingClientRect 全是 0，
+    //    断言会"因为元素不可见反而通过"（这种假绿最坑人，所以这里连尺寸一起查）。
+    await js('window.__petTest.memoOpen()');
+    await wait(700);
+    const chatInputEl = await js(`(() => {
+      const el = document.getElementById('chatInput');
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const panel = document.getElementById('memo').getBoundingClientRect();
+      return { tag: el.tagName, rect: { left: Math.round(r.left), top: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+               placeholder: el.placeholder, maxLength: el.maxLength,
+               inPanel: r.top >= panel.top - 1 && r.bottom <= panel.bottom + 1, inWindow: r.bottom <= innerHeight,
+               panelBottom: Math.round(panel.bottom), winH: Math.round(innerHeight) };
+    })()`);
+    push('桌宠气泡那一侧有「和她说…」输入框（接 API 的入口在界面上）',
+      !!chatInputEl && chatInputEl.inPanel === true && chatInputEl.inWindow === true
+      && chatInputEl.rect.w > 100 && chatInputEl.rect.h >= 20 && /说句话/.test(chatInputEl.placeholder || ''),
+      chatInputEl ? `${chatInputEl.tag} ${chatInputEl.rect.w}x${chatInputEl.rect.h} @(${chatInputEl.rect.left},${chatInputEl.rect.top})`
+        + ` 提示语="${chatInputEl.placeholder}" 上限=${chatInputEl.maxLength} 字`
+        + ` 在面板内=${chatInputEl.inPanel} 面板底=${chatInputEl.panelBottom} ≤ 窗口高=${chatInputEl.winH}` : '没找到 #chatInput');
+
+    // 空消息不该发请求（省得白花主人的 token），而且必须"立刻返回"不卡界面
+    const t0 = Date.now();
+    const emptySend = await js('window.__petTest.chatSend("   ")');
+    const emptyMs = Date.now() - t0;
+    push('空消息不发送（不浪费主人的 token）',
+      emptySend && emptySend.ok === false && emptySend.kind === 'empty' && emptyMs < 1500,
+      `返回 ${JSON.stringify(emptySend)}，耗时 ${emptyMs}ms`);
+
+    // 驱动一次真实发送：走的是渲染层那条路（回车 → 主进程 → 台词回来）。
+    // 没配密钥时主进程会立刻用"还没拿到钥匙"那句兜住 —— 这一步**不会真的联网**。
+    //
+    // ⚠️ 先确认面板真的开着再打字：打包版启动比开发版慢（首帧多几百毫秒），
+    //    实测偶发"面板还没展开就发消息"→ 面板矩形量出来是 [0,0]、
+    //    "气泡在她右上方"那条断言会误报红（跑两次能复现一次）。这里补一次保险。
+    {
+      const opened = await js('window.__petTest.memoSnapshot()');
+      if (!opened || opened.open !== true) {
+        await js('window.__petTest.memoOpen()');
+        await wait(700);
+      }
+    }
+    const chatBox = await js(`(() => {
+      const el = document.getElementById('chatInput');
+      el.focus(); el.value = '自检：你在吗';
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      return { value: el.value };
+    })()`);
+    await wait(1600);
+    const chatAfter = await js('window.__petTest.chatSnapshot()');
+    const chatUnconfigured = !apiConfig.load().apiKey;
+    push('对话这条路是通的（回车 → 主进程 → 台词回到气泡）',
+      chatAfter.sends >= 1 && (chatUnconfigured
+        ? (chatAfter.lastKind === 'noKey' && /钥匙/.test(chatAfter.lastText || ''))
+        : (chatAfter.lastKind === 'ok' ? chatAfter.replies >= 1 : chatAfter.errors >= 1)),
+      `输入框已清空=${chatBox.value === ''} 发送次数=${chatAfter.sends} 最近 kind=${chatAfter.lastKind}`
+      + ` ${chatAfter.lastMs}ms 台词="${(chatAfter.lastText || '').slice(0, 30)}"`
+      + (chatUnconfigured ? '（自检时没配密钥 → 走"还没拿到钥匙"这条兜底，不会真的联网）' : '（已配密钥 → 真发了一次）'));
+    const bubbleAfterChat = await js('window.__petTest.state()');
+    push('她说的话落在气泡里（气泡不空、在窗口内）',
+      bubbleAfterChat.bubbleShown === true && (bubbleAfterChat.bubbleText || '').length > 2
+      && bubbleAfterChat.bubbleInViewport === true,
+      `气泡="${(bubbleAfterChat.bubbleText || '').slice(0, 30)}" 在窗口内=${bubbleAfterChat.bubbleInViewport}`);
+
+    // ★ 主人 2026-09-27 定的规矩：**收起时气泡在她左上角，面板打开时气泡改到她右上角**
+    //   （面板紧贴她左边，气泡落在她右边、依然贴着她）。
+    //   这里量的是真实矩形：气泡与面板不许相交，而且气泡要在她右边。
+    fs.writeFileSync(path.join(ARTIFACTS, 'shot-chat-split.png'), (await win.webContents.capturePage()).toPNG());
+    const bl = bubbleAfterChat.bubbleLayout;
+    const bubbleOnRightSide = !!bl && bl.bubble.left >= bl.panel.right - 1;
+    push('面板打开时气泡在她右上方（面板在她左边、二者不重叠、气泡没被推出窗口）',
+      !!bl && bl.chatting === true && bl.panel.width > 40 && bl.overlapsPanel === false
+      && bubbleOnRightSide && bl.bubble.left >= 0 && bl.bubble.right <= bl.winW + 2,
+      bl ? `面板 [${bl.panel.left},${bl.panel.right}]（侧=${bl.panelSide}） 气泡 [${bl.bubble.left},${bl.bubble.right}]`
+        + ` 窗口宽=${bl.winW} 在面板右侧=${bubbleOnRightSide} 相交=${bl.overlapsPanel}`
+        + ` 气泡在窗口内=${bl.bubble.left >= 0 && bl.bubble.right <= bl.winW + 2}`
+      : '拿不到 bubbleLayout');
+
+    // 长回复也得待在她右边、不压面板、不出窗口
+    await js(`window.__petTest.sayLine('${'长'.repeat(56)}')`);
+    await wait(500);
+    const blLong = (await js('window.__petTest.state()')).bubbleLayout;
+    push('长回复时气泡依然在她右上方、不压面板',
+      !!blLong && blLong.overlapsPanel === false && blLong.bubble.left >= blLong.panel.right - 1
+      && blLong.bubble.left >= 0 && blLong.bubble.right <= blLong.winW + 2,
+      blLong ? `56 字回复：气泡 [${blLong.bubble.left},${blLong.bubble.right}] 面板 [${blLong.panel.left},${blLong.panel.right}]`
+        + ` 间隙=${blLong.gap}px 相交=${blLong.overlapsPanel}` : '拿不到 bubbleLayout');
+
+    // ★ 注意 classify 的签名是 classify(网络错误对象, HTTP 状态码, 响应正文)：
+    //   上面 8 行测的是"错误分类器"本身（不联网），最后一行才是真发一次请求。
+    // ★ 注意两种返回的形状不一样：classify() 给的是 { kind, line }（纯分类器），
+    //   chat() 给的是 { ok, kind, text }（已经带上了台词）。这里统一取台词再比对。
+    const cases = [
+      ['没配密钥', await chatApi.chat({ ...cfgObj, apiKey: '' }, [{ role: 'user', content: 'hi' }]), 'noKey'],
+      ['接口关了（设置里关掉）', await chatApi.chat({ ...cfgObj, apiKey: 'sk-selftest-not-real', enabled: false }, [{ role: 'user', content: 'hi' }]), 'disabled'],
+      ['401/403 密钥不对', chatApi.classify(null, 401, ''), 'auth'],
+      ['402 余额不足', chatApi.classify(null, 402, ''), 'quota'],
+      ['429 请求太快', chatApi.classify(null, 429, ''), 'rate'],
+      ['404 模型名写错', chatApi.classify(null, 404, ''), 'notfound'],
+      ['500 对面服务器出错', chatApi.classify(null, 503, ''), 'server'],
+      ['连不上（DNS 失败）', chatApi.classify({ code: 'ENOTFOUND', message: 'getaddrinfo ENOTFOUND' }, 0, ''), 'network'],
+    ];
+    const lineOf = (r) => String((r && (r.text || r.line)) || '');
+    const lost = cases.filter(([, r, kind]) => r.kind !== kind || !lineOf(r));
+    const offline = await chatApi.chat({ ...cfgObj, apiKey: 'sk-selftest-not-real', baseUrl: 'http://127.0.0.1:1', model: 'x', timeoutMs: 3000 },
+      [{ role: 'user', content: 'hi' }]);
+    push('各种失败都有人话（8 类错误 + 真·连不上都翻译成台词）',
+      lost.length === 0 && offline.ok === false && !!offline.text && ['network', 'timeout'].includes(offline.kind),
+      lost.length ? `漏了: ${lost.map(([n]) => n).join(', ')}`
+        : `8 类：${cases.map(([n, r]) => `${n}→"${lineOf(r)}"`).join(' ')}｜真连不上 kind=${offline.kind} "${offline.text}"`);
+
+    const ready = !!(cfgObj.apiKey && cfgObj.baseUrl && cfgObj.model);
+    push(ready ? 'API 已配置（真机可对话）' : 'API 未配置：桌宠照常跑，点她仍会说本地台词（不报错）',
+      true,
+      ready ? `地址=${cfgObj.baseUrl} 模型=${cfgObj.model}（真实调用请主人自己点一下试）`
+        : `还没填密钥；失败台词示例："${chatApi.ERROR_LINES.noKey}"`);
+
+    // 设置窗口是真窗口：自检里把它打开一次，确认"能加载、表单铺开、没有渲染报错"，
+    // 然后抓一张图存到 artifacts（人家看不见图，主人可以自己点开看）
+    try {
+      const sw = openSettingsWindow('selftest');
+      await new Promise((r) => sw.webContents.once('did-finish-load', r));
+      await wait(1200);
+      const form = await sw.webContents.executeJavaScript(`(() => {
+        const v = (id) => { const e = document.getElementById(id); return e ? e.value : null; };
+        const b = document.getElementById('baseUrl');
+        return { title: document.title, baseUrl: v('baseUrl'), model: v('model'), enabled: document.getElementById('enabled').checked,
+                 keyEmpty: document.getElementById('apiKey').value === '', keyType: document.getElementById('apiKey').type,
+                 presets: document.querySelectorAll('#presets button').length,
+                 baseUrlW: b ? Math.round(b.getBoundingClientRect().width) : 0,
+                 fitsNoScroll: document.body.scrollHeight <= innerHeight + 2,
+                 buttons: !!(document.getElementById('save') && document.getElementById('test') && document.getElementById('openCfg')) };
+      })()`);
+      fs.writeFileSync(path.join(ARTIFACTS, 'shot-settings.png'), (await sw.webContents.capturePage()).toPNG());
+      push('设置窗口能打开且表单铺开（截图 artifacts/shot-settings.png）',
+        form.title.includes('设置') && form.baseUrl === cfgObj.baseUrl && form.model === cfgObj.model
+        && form.presets >= 4 && form.baseUrlW > 200 && form.buttons === true && form.keyEmpty === true,
+        `标题=${form.title} 地址框="${form.baseUrl}" 模型="${form.model}" 宽=${form.baseUrlW}px`
+        + ` 预设=${form.presets} 个 密钥框为空=${form.keyEmpty} 类型=${form.keyType} 一次不用滚动=${form.fitsNoScroll}`);
+      sw.destroy();
+      await wait(400);
+    } catch (err) {
+      push('设置窗口能打开且表单铺开（截图 artifacts/shot-settings.png）', false,
+        '打开失败: ' + (err && err.message));
+    }
   }
 
   const shot = path.join(ARTIFACTS, 'shot-interaction.png');
@@ -1422,7 +2018,168 @@ async function runBubbleProbe() {
   }
 }
 
-app.whenReady().then(createWindow);
+// ---------- API 设置 + 对话（第 25 轮） ----------
+//
+// 三层分工，别搞混：
+//   1) 密钥与配置：lib/api-config.js（主进程；渲染层永远拿不到真实密钥）
+//   2) 网络请求：lib/chat.js（主进程；渲染层有 CSP，本来也发不出去）
+//   3) 界面：设置窗口（settings.html）+ 桌宠气泡上那一行输入框（renderer.js）
+//
+// 对话历史也放主进程：渲染层只负责"把主人说的话发过来、把回复显示出来"，
+// 免得刷新页面/重开面板就把上下文弄丢。
+
+const chatState = {
+  history: [],        // [{role:'user'|'assistant', content}]，只留最近 N 轮
+  last: null,         // 最近一次结果（自检与诊断用）
+  sending: false,
+  contextLost: false, // 送上下文时被接口拒了，就退回单轮重试一次（见 sendChat）
+};
+
+// 设置窗口：**独立小窗**，不是塞进桌宠那个 200x250 的透明窗口。
+// 理由写在 devlog/round-25.md：桌宠窗口是逐像素穿透的透明窗，
+// 在里面塞表单既要改穿透掩码、又会被窗口尺寸绑死，得不偿失。
+let settingsWin = null;
+function openSettingsWindow(from) {
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    settingsWin.show();
+    settingsWin.focus();
+    logInput({ src: 'main', type: 'settings', detail: `设置窗口已存在，叫到前面（来源=${from}）` });
+    return settingsWin;
+  }
+  settingsWin = new BrowserWindow({
+    // 高度 760（150% DPI 下视口约 700 逻辑像素）：实测紧凑排版后设置页内容约 686px，
+    // 760 能一次把「保存 / 测试连接 / 状态 / 配置路径」全看全，不用先滚动找按钮。
+    width: 470,
+    height: 760,
+    minWidth: 400,
+    minHeight: 420,
+    resizable: true,
+    minimizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    title: '桌宠 · 设置（接入 API）',
+    backgroundColor: '#eef4f9',
+    show: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(ROOT, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  settingsWin.setMenuBarVisibility(false);   // 设置窗口不需要"文件/编辑/视图"那一排
+  settingsWin.loadFile(path.join(ROOT, 'renderer', 'settings.html'));
+  settingsWin.once('ready-to-show', () => settingsWin.show());
+  settingsWin.on('closed', () => { settingsWin = null; });
+  logInput({ src: 'main', type: 'settings', detail: `打开设置窗口（来源=${from}）` });
+  return settingsWin;
+}
+
+// 发一句话给她，把回复塞进气泡。**永远不 throw**：任何失败都要有一句台词。
+async function sendChat(text, source) {
+  const cfg = apiConfig.load();
+  const msg = String(text || '').trim().slice(0, 200);
+  if (!msg) return { ok: false, kind: 'empty', text: '' };
+  if (chatState.sending) {
+    return { ok: false, kind: 'busy', text: '（人家还在想上一句呢…）' };
+  }
+  chatState.sending = true;
+  const started = Date.now();
+  try {
+    // 组装 messages：人设 + 最近 N 轮 + 这一句
+    const messages = [{ role: 'system', content: apiConfig.systemPrompt(cfg) }];
+    if (cfg.historyRounds > 0) {
+      messages.push(...chatState.history.slice(-cfg.historyRounds * 2));
+    }
+    messages.push({ role: 'user', content: msg });
+
+    let res = await chatApi.chat(cfg, messages);
+    // 有的网关不接受 system 角色或多轮上下文（报 400）→ 退回单轮再试一次，
+    // 而不是直接让主人看到"对面回的话人家看不懂"。这就是"能降级就别报错"。
+    if (!res.ok && res.status === 400 && messages.length > 2) {
+      logInput({ src: 'main', type: 'chat', detail: '带上下文被拒（HTTP 400）→ 退回单轮重试' });
+      chatState.contextLost = true;
+      res = await chatApi.chat(cfg, [{ role: 'user', content: msg }]);
+    }
+
+    chatState.last = { ...res, at: new Date().toISOString(), source, ms: res.ms || (Date.now() - started) };
+    if (res.ok) {
+      chatState.history.push({ role: 'user', content: msg });
+      chatState.history.push({ role: 'assistant', content: res.text });
+      const keep = Math.max(2, (cfg.historyRounds || 0) * 2);
+      if (chatState.history.length > keep) chatState.history = chatState.history.slice(-keep);
+      logInput({ src: 'main', type: 'chat', detail: `对话成功（${res.ms}ms，${res.text.length} 字）` });
+    } else {
+      // 失败不写进历史：免得下一次请求带着一串"没答上的问题"污染上下文
+      logInput({ src: 'main', type: 'chat', detail: `对话失败 kind=${res.kind} ${res.detail || res.text}` });
+    }
+    if (win && !win.isDestroyed()) {
+      // 成功时给长一点；失败那句也别一闪而过（主人得看清"是钥匙不对还是没网"）
+      win.webContents.send('pet:say', res.text, res.ok ? 5200 : 4200);
+      if (res.ok) win.webContents.send('pet:action', 'happy');
+    }
+    return res;
+  } finally {
+    chatState.sending = false;
+  }
+}
+
+ipcMain.handle('pet:api-config-get', () => {
+  const view = apiConfig.publicView();
+  logInput({ src: 'main', type: 'api-config', detail: `读取设置（hasKey=${view.hasKey} 地址=${view.baseUrl} 模型=${view.model}）` });
+  return view;
+});
+ipcMain.handle('pet:api-config-save', (_e, patch) => {
+  const merged = apiConfig.save(patch || {});
+  const view = apiConfig.publicView(merged);
+  // ★ 日志里**绝不能出现密钥**：只记"配了没有 / 换成什么地址"
+  logInput({ src: 'main', type: 'api-config', detail: `保存设置（hasKey=${view.hasKey} 地址=${view.baseUrl} 模型=${view.model} 记忆=${view.historyRounds} 轮）` });
+  return view;
+});
+ipcMain.handle('pet:api-presets', () => apiConfig.PRESETS);
+ipcMain.handle('pet:api-test', async () => {
+  const res = await chatApi.testConnection(apiConfig.load());
+  logInput({ src: 'main', type: 'api-test',
+    detail: res.ok ? `测试连接成功（${res.ms}ms）：${res.text}` : `测试连接失败 kind=${res.kind} ${res.detail || res.text}` });
+  chatState.last = { ...res, at: new Date().toISOString(), source: 'test' };
+  return res;
+});
+ipcMain.handle('pet:chat-send', async (_e, payload) => {
+  const text = payload && payload.text;
+  const from = (payload && payload.source) || 'ui';
+  const res = await sendChat(text, from);
+  // 渲染层要的是"立刻能显示的东西"：真正的台词（成功或失败都有），外加 ok 供自检判定
+  return { ok: !!res.ok, kind: res.kind, text: res.text, ms: res.ms || 0, sending: false };
+});
+ipcMain.handle('pet:chat-state', () => ({
+  sending: chatState.sending,
+  history: chatState.history.length,
+  last: chatState.last,
+  contextLost: chatState.contextLost,
+  ready: apiConfig.publicView().ready,
+}));
+// 设置窗口的"打开配置文件位置"：直接把 api-config.json 在资源管理器里选中，
+// 主人想手动备份/搬到别的电脑时用得上（也能顺手确认"密钥到底存在哪")
+ipcMain.handle('pet:open-config-file', () => {
+  const p = apiConfig.getConfigPath();
+  try {
+    const { shell } = require('electron');
+    if (fs.existsSync(p)) shell.showItemInFolder(p);
+    else shell.openPath(path.dirname(p));
+    return { ok: true, path: p };
+  } catch (err) {
+    return { ok: false, path: p, error: String(err && err.message || err) };
+  }
+});
+// 长回复要能待在屏幕上：气泡显示时长由渲染层按字数决定（见 renderer.js 的 say）
+ipcMain.on('pet:open-settings', (_e, payload) => openSettingsWindow((payload && payload.source) || 'ipc'));
+
+app.whenReady().then(() => {
+  // 配置路径依赖 userData，所以要在 whenReady 之后（也是 app.getPath 可用的最早时机）。
+  // userData 就是 %APPDATA%\dsh-desktop-pet —— 便携版和安装版共用同一份设置。
+  apiConfig.init(app.getPath('userData'));
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (!AUTOTEST) app.quit();

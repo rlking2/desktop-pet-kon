@@ -1,5 +1,8 @@
-﻿node_modules/
+node_modules/
 artifacts/
+dist/
+dist-installer/
+build-resources/
 *.log
 _fixtures/
 assets/build/

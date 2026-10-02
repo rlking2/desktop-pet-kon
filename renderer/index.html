@@ -17,15 +17,25 @@
       <div class="memo-scroll" id="memoScroll">
         <div class="memo-grid" id="memoList"></div>
       </div>
+      <!-- 描边调试用的两条横条已按主人要求拆除（数值已固化在 renderer.js 的 OUTLINE 里）；
+           以后要再调，照 devlog/round-23.md 里的说明加回来即可 -->
       <div class="memo-foot" id="memoFoot"></div>
+
+      <!-- 对话输入（第 25 轮：接入 API）。
+           为什么放在待办面板里、为什么只占一行：桌宠窗口高度锁死 250px，
+           面板再加一块就会被裁掉；放在这里既能打字又不用改窗口/穿透掩码的几何。
+           分清两个输入框：上面那个是"加任务"，这个带分隔线的「和她说…」才是跟她说话。 -->
+      <div class="chat-sep" id="chatSep">和她说…</div>
+      <input class="chat-input" id="chatInput" type="text" maxlength="120" placeholder="跟我说句话吧，回车发送…" />
     </div>
 
     <div class="bubble" id="bubble" role="status"></div>
 
-    <div class="pet" id="pet" title="按住拖动">
+    <div class="pet" id="pet">
       <!-- 角色本体由 canvas 绘制：有素材时播帧动画，没素材时画一个"空位提示" -->
+      <!-- 原来这里还有一行白色提示「按住拖我走 · 右键有菜单」（鼠标靠近时淡入），
+           主人 2026-09-24 要求去掉 —— 连 .pet 的 title 提示一起删了，靠近时干干净净 -->
       <canvas id="sprite" class="sprite" width="130" height="130"></canvas>
-      <div class="hint">按住拖我走 · 右键有菜单</div>
     </div>
 
     <div class="dbg" id="dbg">

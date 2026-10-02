@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <!-- 设置窗口是**普通窗口**（不透明、不穿透），CSP 仍然收紧：脚本只许本地文件 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
+  <title>桌宠 · 设置（接入 API）</title>
+  <link rel="stylesheet" href="settings.css" />
+</head>
+<body>
+  <header class="head">
+    <h1>接入 API，让她会说话</h1>
+    <p class="sub">填上你自己的大模型接口，左键点开她 → 在「和她说…」那一行打字，她就用大模型回你。
+      <strong>密钥只存在这台电脑上</strong>（主进程读写），不会发给别人、也不会跟着安装包走。</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="row">
+        <label class="switch">
+          <input type="checkbox" id="enabled" />
+          <span>启用对话（关掉 = 仍用本地台词，不联网）</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <span class="label">服务商预设</span>
+        <div class="presets" id="presets"></div>
+      </div>
+
+      <div class="row">
+        <label class="label" for="baseUrl">接口地址（Base URL）</label>
+        <input id="baseUrl" type="text" spellcheck="false" placeholder="https://api.deepseek.com" />
+        <p class="tip">DeepSeek 官方是 <code>https://api.deepseek.com</code>；OpenAI 兼容网关通常要带 <code>/v1</code>。
+          填到 <code>/chat/completions</code> 也行，人家会自动识别。</p>
+      </div>
+
+      <div class="row">
+        <label class="label" for="apiKey">API 密钥</label>
+        <div class="key-row">
+          <input id="apiKey" type="password" spellcheck="false" autocomplete="off" placeholder="sk-…" />
+          <button type="button" id="toggleKey" class="ghost" title="显示/隐藏">显示</button>
+        </div>
+        <p class="tip" id="keyTip">留空并保存 = 不修改已存的密钥。</p>
+      </div>
+
+      <div class="row">
+        <label class="label" for="model">模型名</label>
+        <input id="model" type="text" spellcheck="false" placeholder="deepseek-chat" />
+        <p class="tip">DeepSeek：<code>deepseek-chat</code>（快）或 <code>deepseek-reasoner</code>（会思考，慢）。</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <details>
+        <summary>高级（一般不用动）</summary>
+        <div class="row">
+          <label class="label" for="temperature">活泼程度 temperature：<span id="tempVal">1.1</span></label>
+          <input id="temperature" type="range" min="0" max="2" step="0.1" value="1.1" />
+        </div>
+        <div class="row">
+          <label class="label" for="maxTokens">回复长度上限 max_tokens：<span id="tokVal">120</span></label>
+          <input id="maxTokens" type="range" min="32" max="400" step="8" value="120" />
+          <p class="tip">气泡很小，太长会被裁；人家还会再把回复压到 60 字以内。</p>
+        </div>
+        <div class="row">
+          <label class="label" for="historyRounds">记住最近几轮对话：<span id="histVal">6</span>（0 = 不带上下文，最省）</label>
+          <input id="historyRounds" type="range" min="0" max="12" step="1" value="6" />
+        </div>
+        <div class="row">
+          <label class="label" for="timeoutMs">超时（毫秒）：<span id="toVal">20000</span></label>
+          <input id="timeoutMs" type="range" min="3000" max="60000" step="1000" value="20000" />
+        </div>
+        <div class="row">
+          <label class="label" for="systemPrompt">人设提示词（留空 = 用内置的她）</label>
+          <textarea id="systemPrompt" rows="4" spellcheck="false" placeholder='留空就用内置人设：自称「人家」的鲸鱼娘、说话不超过 40 字…'></textarea>
+        </div>
+      </details>
+    </section>
+
+    <div class="actions">
+      <button type="button" id="save" class="primary">保存</button>
+      <button type="button" id="test" class="ghost">测试连接</button>
+      <button type="button" id="openCfg" class="ghost">打开配置文件位置</button>
+    </div>
+
+    <div class="status" id="status" role="status"></div>
+    <p class="foot">
+      配置存在 <code id="cfgPath">…</code>（便携版和安装版共用，升级不丢；换电脑复制这个文件）
+    </p>
+  </main>
+
+  <script src="settings.js"></script>
+</body>
+</html>

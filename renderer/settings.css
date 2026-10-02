@@ -1,0 +1,102 @@
+/* 设置窗口样式：跟待办面板同一个色系（浅蓝灰），但因为是普通窗口，可以用更宽松的排版 */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: #eef4f9;
+  color: #1f2933;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 13px;
+  /* 紧凑排版是被量出来的：默认窗口视口约 456x658（150% DPI），
+     内容总高必须压到这个数以下，不然"保存/测试"按钮会被挤到滚动区外（实测 783px 时按钮卡在 636 处、底部说明全看不见）。 */
+  padding: 12px 16px 16px;
+  overflow-y: auto;
+  user-select: none;
+}
+
+.head h1 { font-size: 15.5px; color: #22384d; }
+.head .sub { margin-top: 5px; font-size: 11px; line-height: 1.55; color: #4a6076; }
+.head .sub strong { color: #1c6b5a; }
+
+.card {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid rgba(120, 140, 160, .35);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(20, 40, 60, .06);
+}
+
+.row { margin-bottom: 9px; }
+.row:last-child { margin-bottom: 0; }
+
+.label { display: block; font-size: 11.5px; font-weight: 700; color: #33475b; margin-bottom: 3px; }
+.tip { margin-top: 3px; font-size: 10.5px; line-height: 1.5; color: #6b7d8f; }
+.tip code, code { background: rgba(120, 140, 160, .14); border-radius: 4px; padding: 0 4px; font-size: 10.5px; }
+
+input[type="text"], input[type="password"], textarea {
+  width: 100%;
+  padding: 7px 9px;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: #1f2933;
+  background: #fbfdff;
+  border: 1px solid rgba(120, 140, 160, .55);
+  border-radius: 7px;
+  outline: none;
+  user-select: text;
+}
+input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+  border-color: #5aa9e6;
+  box-shadow: 0 0 0 2px rgba(90, 169, 230, .2);
+}
+textarea { resize: vertical; line-height: 1.6; }
+
+input[type="range"] { width: 100%; accent-color: #5aa9e6; }
+
+.key-row { display: flex; gap: 8px; align-items: center; }
+.key-row input { flex: 1 1 auto; }
+
+button {
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 140, 160, .55);
+  background: #fff;
+  color: #22384d;
+  cursor: pointer;
+}
+button:hover { background: #f2f8ff; border-color: #5aa9e6; }
+button:disabled { opacity: .55; cursor: default; }
+button.primary { background: #5aa9e6; border-color: #4a97d2; color: #fff; font-weight: 700; }
+button.primary:hover { background: #4a97d2; }
+button.ghost { background: rgba(120, 140, 160, .08); }
+
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.presets button { padding: 5px 10px; font-size: 11.5px; border-radius: 999px; }
+.presets button.on { background: #d9ecff; border-color: #5aa9e6; }
+
+.switch { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: #33475b; cursor: pointer; }
+.switch input { width: 16px; height: 16px; accent-color: #5aa9e6; }
+
+.actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+.status {
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: rgba(120, 140, 160, .1);
+  border: 1px solid rgba(120, 140, 160, .28);
+  min-height: 16px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.status.ok { background: #e7f7f0; border-color: #7fd6c8; color: #1c6b5a; }
+.status.bad { background: #fdeeee; border-color: #e8a9a9; color: #97403f; }
+.status.busy { background: #fff8e6; border-color: #e6cf8a; color: #7a5c14; }
+
+.foot { margin-top: 10px; font-size: 10.5px; line-height: 1.6; color: #6b7d8f; word-break: break-all; }
+
+details summary { cursor: pointer; font-size: 12px; font-weight: 700; color: #33475b; margin-bottom: 8px; }

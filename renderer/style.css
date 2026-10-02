@@ -11,48 +11,41 @@ html, body {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
 }
 
-/* 场景布局：用 grid 固定列宽，位置完全确定，
-   不用 flex —— flex 的"拉伸/收缩"会让桌宠在窗口变宽时漂移（实测 810 → 1066）。
-   收起态：单列 = 素材显示宽度 + 边距，靠窗口右边缘。
-   展开态：两列 [面板 300px][桌宠列]，桌宠仍在最右列 → 屏幕位置恒定不变。
-   --sprite-w 由渲染层按素材真实宽高比设置（竖构图素材 → 列更窄）。 */
+/* ⚠️ 第 27 轮起**不再用网格布局**：面板和人物都是绝对定位，气泡的坐标由 JS 按人物矩形算。
+   为什么把网格撤掉：面板明明写了 `position:absolute`，却被网格"锁"在自己的格子内
+   （实测 CSS left:6px 而实际 offsetLeft=380 —— 绝对定位的包含块是**网格区域**、不是窗口！），
+   于是面板永远钉不到窗口左边、气泡也就躲不开它。改成 position:relative + 绝对定位子元素后，
+   三者的坐标都相对窗口，互不干涉。
+   规矩（主人 2026-09-27 定的）：
+     · 人物 —— 钉在窗口右下角
+     · 面板 —— 打开时钉在窗口左边（left 6px）
+     · 气泡 —— 收起时在她左上角；面板打开时改到她右上角（躲开面板、依旧贴着她）
+   窗口宽度 = 面板 + 人物 + 气泡三者的横向之和（见 main.js 的 closedWidth/openWidth）。 */
 .scene {
   --sprite-w: 130px;
+  --bubble-w: 190px;
+  --panel-w: 300px;                 /* 面板占的横向宽度（面板 288 + 左右各 6 边距） */
   position: relative;
   width: 100vw;
   height: 100vh;
-  display: grid;
-  grid-template-columns: calc(var(--sprite-w) + 28px);
-  /* ⚠️ 行高必须钉死为窗口高度：align-items:end 是相对"行"底部对齐的，
-     若行高被内容撑大（角色 215 + margin 28 > 窗口 250），行底会溢出窗口，
-     角色就被推到窗口外 → 面板展开时实测偏移 5px（主人明确要求不能动）。 */
-  grid-template-rows: 100%;
-  justify-content: end;                   /* 整体靠右：桌宠贴住窗口右边缘 */
-  align-items: end;
-}
-.scene.memo-open {
-  grid-template-columns: 300px calc(var(--sprite-w) + 28px);
-  grid-template-areas: "memo pet";
-  grid-template-rows: 100%;
-}
-.scene.memo-open .memo { grid-area: memo; }
-.scene.memo-open .pet { grid-area: pet; }
-/* 面板放右侧（左边放不下时才会走到这里）：桌宠换到最左列 */
-.scene.memo-open.panel-right {
-  grid-template-columns: calc(var(--sprite-w) + 28px) 300px;
-  grid-template-areas: "pet memo";
-  grid-template-rows: 100%;
-  justify-content: start;
 }
 
 /* ---------- 待办面板 ---------- */
+/* ⚠️ 面板也用**绝对定位**钉在窗口左侧（第 27 轮定稿）：面板列/气泡列/桌宠列三方都靠网格排，
+   只要有一列算不准，另外两方就会被挤偏（这一轮为了这个坑反复试了好几版）。
+   现在规矩最简单：**桌面左侧一条面板、最右侧钉着人物、气泡紧跟人物左上角**，
+   三者的位置互相独立，谁也不挤谁。 */
 .memo {
-  position: relative;
+  position: absolute;
+  /* ⚠️ 面板宽 288 + 左右各 6 边距 = 300：钉在窗口左侧。
+     为什么用绝对定位：网格排布时只要有一列算不准，面板和气泡就会互相挤偏
+     （第 26/27 轮反复翻车的根源）。绝对定位之后三个东西互不干涉：
+     面板在左、人物钉右下、气泡紧跟人物。 */
+  left: 6px;
+  bottom: 6px;
   width: 288px;
   min-width: 288px;          /* 不许被压缩（实测被 flex 压到 279 导致布局错位） */
-  justify-self: center;
-  align-self: end;
-  margin: 6px;
+  margin: 0;
   padding: 8px;
   border-radius: 10px;
   background: rgba(250, 252, 254, .98);
@@ -115,11 +108,15 @@ html, body {
 }
 .memo-input:focus { border-color: #5aa9e6; box-shadow: 0 0 0 2px rgba(90, 169, 230, .22); }
 
-/* 滚动容器：固定高度 = 默认可见 5 栏。
+/* 滚动容器：固定高度 = 默认可见 4 栏。
    ⚠️ 高度必须给在"外层容器"上，不能只给 grid 的 max-height——
-      因为 grid-auto-rows 会把行高压缩去塞进 max-height，结果是行变矮而不是溢出滚动。 */
+      因为 grid-auto-rows 会把行高压缩去塞进 max-height，结果是行变矮而不是溢出滚动。
+   ⚠️ 第 25 轮从 130px（5 栏）改成 88px（4 行里露出约 3 行半）：
+      面板里加了一行「和她说…」对话输入，窗口只有 250px 高（减掉 6px 上下边距就是面板的天花板），
+      不腾高度就会被裁掉 —— 实测 103px 时面板自然高 251px > 可用 238px，面板顶边跑到 -1 被裁。
+      主人的重点是"能跟她说上话"，所以让待办默认少露一行（超出仍在滚动区里，一条都不会丢）。 */
 .memo-scroll {
-  height: 130px;
+  height: 88px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 2px;
@@ -193,14 +190,64 @@ html, body {
   text-align: center;
 }
 
-/* ---------- 对话气泡 ---------- */
+/* ---------- 对话输入（第 25 轮：接入 API 的入口） ---------- */
+/* 一行分隔线 + 一行输入框：靠它跟"待办输入栏"区分开，
+   免得主人搞不清哪个框是"加任务"、哪个框是"跟她说话"。
+   面板总高不变（收起 → 展开时窗口宽度在变、高度不变，桌宠位置才不会被推走）。 */
+.chat-sep {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: rgba(60, 86, 112, .75);
+  letter-spacing: .5px;
+}
+.chat-sep::before,
+.chat-sep::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(120, 140, 160, .5), transparent);
+}
+.chat-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #1f2933;
+  background: #fff;
+  border: 1px solid rgba(120, 140, 160, .55);
+  border-radius: 7px;
+  outline: none;
+}
+.chat-input:focus { border-color: #7fd6c8; box-shadow: 0 0 0 2px rgba(127, 214, 200, .25); }
+/* 等待回复时的状态：输入框变灰 + 占位文字换成"人家正在想…"（由 JS 改 placeholder） */
+.chat-input.busy { border-color: rgba(120, 140, 160, .5); background: #f4f7fa; color: #6b7d8f; }
+
+/* ---------- 对话气泡：永远住在「气泡列」里，而且**就在她旁边** ----------
+   主人 2026-09-25 的要求有两条，都要满足：
+     ① 「回复框放在另一边」 —— 提问面板在右时，气泡必须在左（反之亦然）；
+     ② 「在人物两边，而不是远离人物」+「放在人物左上方」 —— 气泡贴着她的**左上角**，
+        不能被丢到很远的地方、也不要横着摊满一整列。
+   做法：气泡固定在窗口**左上角**（right 定位、宽度约 160px），离她头顶很近；
+        面板列插在气泡列和桌宠列之间 → 展开时气泡就在「提问框的另一侧、人物左上方」，
+        而且**横向位置和收起态一模一样**（不会因为开面板而跳）。
+   ⚠️ 别用"占满气泡列宽度"的写法：那样气泡会横着摊到贴近面板，
+      看着就不像"在她左上方"了（主人 2026-09-27 反馈过）。 */
 .bubble {
   position: absolute;
   top: 4px;
-  left: 50%;
-  transform: translate(-50%, 0) scale(.85);
-  max-width: 192px;
-  min-width: 112px;
+  /* ★ 让她"贴在人物左上方"（主人 2026-09-27 的要求）：
+     具体位置由 renderer.js 的 relayoutBubble() 按她的**真实矩形**算出来写进 style.left。
+     为什么不在 CSS 里写 `right: calc(100% - ...)`：那个写法依赖 --sprite-w，
+     而她是绝对定位的（不占网格），列宽变量跟她的真实宽度不总是同步（实测差 37px，
+     结果气泡被推到窗口外 -28px）。量矩形最稳：素材多宽、面板开没开都不影响。 */
+  left: 4px;
+  right: auto;
+  width: 150px;                 /* 固定宽度：不横着摊开，视觉上就是"她左上角那一小块" */
+  transform: scale(.85);
+  min-width: 0;
+  max-width: none;
   padding: 7px 11px;
   border-radius: 12px;
   background: rgba(255, 255, 255, .99);
@@ -215,8 +262,25 @@ html, body {
   opacity: 0;
   transition: opacity .15s ease, transform .15s cubic-bezier(.2, 1.6, .4, 1);
   pointer-events: none;
+  /* 长回复要能装下，但**不许顶出窗口**（出窗口 = 屏幕上直接看不见）。
+     上限按窗口高度算：气泡 top 是 4px，往下留 34px 给她的头顶，所以最多约 210px。
+     超出的用 max-height + overflow 裁掉 —— 真正的兜底在下游：lib/chat.js 的 tidy()
+     会把回复压到 60 字以内（60 个汉字 ≈ 5 行 ≈ 100px，正常够用）。 */
+  max-height: 210px;
+  overflow: hidden;
 }
-.bubble.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.bubble.show { opacity: 1; transform: scale(1); }
+/* ⚠️ 第 27 轮起面板**只出现在右侧**（气泡列在最左、面板插在中间、她贴最右），
+   所以这里不再有 "面板在左时气泡挪到右边" 的规则了。留个记号免得以后有人纳闷。 */
+/* 量尺寸专用（只加一帧就撤）：position:static → 气泡参与正常流，
+   getBoundingClientRect().width 就是它的**布局宽度**（有内容时的自然宽度）。
+   平时气泡是 absolute + 无内容空盒子，量不到真实宽度。 */
+.bubble.measuring {
+  position: static;
+  width: auto;                  /* 量的是"自然宽度"（有字时的最宽样子），不是列的宽度 */
+  opacity: 0 !important;
+  visibility: hidden;
+}
 .bubble::after {
   content: "";
   position: absolute;
@@ -228,13 +292,17 @@ html, body {
   border-right: 7px solid transparent;
   border-top: 9px solid #8aa4b8;
 }
-/* 贴顶翻面：窗口贴近屏幕上方时，气泡改从角色下方弹出（否则会被画到窗口外） */
+/* 贴顶翻面：窗口贴近屏幕上方时，气泡改从角色下方弹出（否则会被画到窗口外）。
+   ⚠️ 这里**只改纵轴**（top → bottom），绝对不能再带 translate(-50%, 0)：
+   气泡的横向位置现在由 left/right 定死在气泡列里，多一个 -50% 会被推走半个气泡宽
+   （实测把气泡推到 -77px，直接跑出窗口 —— 自检"气泡左边界≥0"当场红）。
+   这是"同一处代码改了两遍"的经典坑：老规则没跟着新定位一起改。 */
 .scene.flip .bubble {
   top: auto;
   bottom: 6px;
-  transform: translate(-50%, 0) scale(.85);
+  transform: scale(.85);
 }
-.scene.flip .bubble.show { transform: translate(-50%, 0) scale(1); }
+.scene.flip .bubble.show { transform: scale(1); }
 .scene.flip .bubble::after {
   bottom: auto;
   top: -9px;
@@ -242,16 +310,30 @@ html, body {
   border-bottom: 9px solid #8aa4b8;
 }
 
-/* ---------- 角色容器 ---------- */
+/* ---------- 说话气泡躲开提问面板（主人要求：回复不要跟提问窗口挤在同一侧） ----------
+   ★ 第 26 轮定稿：气泡**有自己的列**（--bubble-w，最左边那一列，见上面 .bubble 的规则）。
+   窗口 = [气泡列][面板列][桌宠列]，两种状态列宽一致 →
+   气泡永远待在屏幕上的同一处、与面板之间隔着一整列，开/关面板都不会左右跳、也不会压上去。
+   中间试错两版都记在 devlog/round-26.md：往边上"推"会被窗口裁掉；
+   只加宽窗口不改网格，多出来的宽度会让 grid 的列整体平移，桌宠反而跳了 461px。
+   注：.flip（贴屏幕顶翻到下方）只管纵轴，与这套横向规则互不干扰。 */
+
+/* ★ 桌宠用**绝对定位**钉在窗口右下角（第 27 轮定稿），不再参与网格排布。
+   为什么：她的显示宽度由素材比例决定（实测 167），而网格列宽是 `var(--sprite-w)`；
+   一旦列比 sprite 窄，她就会**溢出到列外**，把窗口撑出"三列之和"之外，
+   grid 再把多出来的空白塞在她**左边** → 气泡看着离她很远（主人：「已经脱离人物了」）。
+   绝对定位之后，她的位置只跟窗口右下角有关，跟列宽算不算得准彻底无关。
+   ⚠️ 面板仍然靠网格放在中间列（`.scene.memo-open .memo` 的 grid-column 规则），
+      而她是绝对定位的、不占网格位置，两者不会互相挤。 */
 .pet {
   --sprite-w: 130px;
   --sprite-h: 130px;
-  position: relative;
+  position: absolute;
+  right: 0;
+  bottom: 0;
   width: var(--sprite-w);
   min-width: var(--sprite-w);
-  justify-self: center;
-  align-self: end;
-  margin: 12px 16px 16px 12px;
+  margin: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -268,17 +350,19 @@ html, body {
   height: var(--sprite-h);
 }
 
-/* ---------- 提示文字（名牌已按主人要求移除） ---------- */
-.hint {
-  margin-top: 4px;
-  font-size: 9px;
-  color: #eaf2f8;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
-  opacity: 0;
-  transition: opacity .2s ease;
-  white-space: nowrap;
-}
-.pet:hover .hint { opacity: .95; }
+/* ---------- 提示文字（已按主人要求全部移除）----------
+   这里原来有一条 `.hint`（「按住拖我走 · 右键有菜单」，`.pet:hover` 时淡入到 0.95），
+   主人 2026-09-24 说"靠近后底下提示白字"，所以：
+     · HTML 里的 .hint 元素删了（连 .pet 的 title="按住拖动" 一起删）
+     · 样式也删了，避免以后有人只删 HTML、留着一条没人用的规则
+   顺带的好处：`.pet` 从"画布 200 + 提示 15"缩到纯 200，**鼠标命中区正好等于角色本身**
+   （贴近下边缘的那一截空白不再算"靠近"了）。 */
+
+/* ---------- 描边调试滑条（已按主人要求拆除）----------
+   主人调好"0.25px / 62%"并固化进 renderer.js 的 OUTLINE 之后，这两条横条和它们的样式都删了
+   （跟当初调速滑条一个流程：调好 → 固化 → 拆掉临时的东西）。
+   以后要再调：把 .ol-row/.ol-label/.ol-value/.ol-slider 这几段加回来，
+   再在 renderer.js 里把滑条那一段接上（devlog/round-23.md 有完整说明）。 */
 
 /* ---------- 互动形变动画 ---------- */
 /* 缺某组素材时，动作靠这些变形表现；有素材时两者叠加也不冲突 */
