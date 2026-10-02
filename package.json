@@ -1,12 +1,17 @@
 {
   "name": "dsh-desktop-pet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "桌宠 —— 透明无边框置顶 + 逐像素鼠标穿透 + 帧动画素材管线 + 自动自检",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "start:debug": "node scripts/start-debug.js",
+    "exe": "node scripts/make-exe.js",
+    "exe:noshortcut": "node scripts/make-exe.js --no-shortcut",
+    "icon": "node scripts/make-icon.js",
+    "installer": "node scripts/make-icon.js && electron-builder --win --config electron-builder.config.js",
+    "installer:dir": "node scripts/make-icon.js && electron-builder --win --dir --config electron-builder.config.js",
     "autotest": "node scripts/autotest.js",
     "inspect": "node scripts/inspect-image.js",
     "assets": "node scripts/inspect-assets.js",
@@ -21,9 +26,11 @@
     "cutout:preview": "node scripts/cutout.js --preview",
     "sheet": "node scripts/make-contact-sheet.js"
   },
-  "author": "",
+  "author": "vitaking",
   "license": "MIT",
-  "dependencies": {
-    "electron": "^44.4.5"
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
   }
 }
