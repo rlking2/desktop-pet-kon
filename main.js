@@ -89,7 +89,7 @@ if (!gotLock) {
     win.show();
     win.focus();
     logInput({ src: 'main', type: 'second-instance', detail: '第二次启动：已把现有窗口叫到前面' });
-    try { win.webContents.send('pet:say', '人家在这儿呢～（一次只能有一只哦）'); } catch { /* 窗口还没加载好就算了 */ }
+    try { win.webContents.send('pet:say', '我在这儿呢～（一次只能有一只哦）'); } catch { /* 窗口还没加载好就算了 */ }
   });
 }
 
@@ -164,7 +164,7 @@ function createWindow() {
     logInput({ src: 'main', type: 'startup', detail: `含4px移动阈值 + mousedown 无 preventDefault；electron=${process.versions.electron}` });
     logInput({ src: 'main', type: 'log-path', detail: inputLogPath || '(未启用)' });
     console.log(`\n[桌宠已启动] 原始输入日志: ${inputLogPath}`);
-    console.log('主人点她几下、右键几下，人家读日志定位问题。\n');
+    console.log('主人点她几下、右键几下，我读日志定位问题。\n');
 
     // 心跳：记录事件发生那一刻的"命中判定 + 穿透状态"
     if (!AUTOTEST) {
@@ -331,6 +331,9 @@ function buildMenuTemplate() {
     // 勾选状态由渲染层回报（menuState.poseGroup），所以主人一眼能看出现在是不是保持中。
     { label: '开心（保持动作）', type: 'checkbox', checked: menuState.poseGroup === 'happy', click: () => win.webContents.send('pet:action', 'happy') },
     { label: '摸头', click: () => win.webContents.send('pet:action', 'headpat') },
+    // 「吃瓜」= 主人的名句梗（第 34 轮）：点一下她就在旁边观察。
+    // 原话「只是觉得女孩子之间真是好啊」出自原作 —— 那里她就是蹲在角落看唯和梓喂食的那位。
+    { label: '吃瓜（围观一下）', click: () => win.webContents.send('pet:action', 'eatmelon') },
     { type: 'separator' },
     // 「设置…」= 接入 API 的入口（填 Base URL / 模型 / 密钥）。
     // 独立窗口，不是塞进桌宠那个透明窗口：表单需要正常的尺寸和焦点。
@@ -350,7 +353,7 @@ function buildMenuTemplate() {
       } },
     { label: '开发者工具', click: () => win.webContents.openDevTools({ mode: 'detach' }) },
     { type: 'separator' },
-    { label: '退出（人家要下班了）', click: () => app.quit() },
+    { label: '退出（我先回去啦）', click: () => app.quit() },
   ];
 }
 
@@ -1384,8 +1387,8 @@ async function runInteractionTest() {
   const tpl = buildMenuTemplate();
   const labels = tpl.filter((i) => i.label).map((i) => i.label);
   const hasLabel = (s) => labels.some((l) => l.includes(s));
-  push('菜单项符合本轮设计（开心 / 摸头 / 安静一会儿 / 设置 / 回到底部右侧 / 开发者工具 / 退出）',
-    labels.length === 8 && hasLabel('开心') && hasLabel('摸头') && hasLabel('安静一会儿') && hasLabel('设置')
+  push('菜单项符合本轮设计（开心 / 摸头 / 吃瓜 / 安静一会儿 / 设置 / 回到底部右侧 / 开发者工具 / 退出）',
+    labels.length === 9 && hasLabel('开心') && hasLabel('摸头') && hasLabel('吃瓜') && hasLabel('安静一会儿') && hasLabel('设置')
     && hasLabel('回到底部右侧') && hasLabel('开发者工具') && hasLabel('退出'),
     `共 ${labels.length} 项: ${labels.join(' / ')}`);
   push('已下架的菜单项不再出现（永远置顶 / 喂白饭 / 让她说句话）',
@@ -1969,7 +1972,10 @@ async function runInteractionTest() {
             personaFields: ['identity', 'style', 'quirks', 'taboos', 'examples'].filter((k) => !!ta(k)),
             presets: document.querySelectorAll('#personaPresets button').length,
             placeholder: ta('identity') ? ta('identity').placeholder.length : 0,
-            actionToggles: ['happy', 'happyOff', 'angry', 'idle'].filter((a) => !!document.querySelector('#actionToggles input[data-action="' + a + '"]')),
+            // 时机开关的数量 = 主进程给的 ACTIONS 长度（第 34 轮加了"吃瓜"→ 5 个）。
+            // ⚠️ 这里不能再写死 4：写死的话每加一个时机都要回来改断言（第 32 轮踩过同一个坑）。
+            actionToggles: (window.__selftestActionKeys || ['happy', 'happyOff', 'angry', 'idle', 'eatmelon'])
+              .filter((a) => !!document.querySelector('#actionToggles input[data-action="' + a + '"]')),
             idleUI: !!(document.getElementById('idleMinutes') && document.getElementById('idlePerDay')
               && document.getElementById('quietFrom') && document.getElementById('quietTo')
               && document.getElementById('idleEnabled') && document.getElementById('muted')),
@@ -1982,7 +1988,7 @@ async function runInteractionTest() {
         fs.writeFileSync(path.join(ARTIFACTS, 'shot-settings.png'), (await sw.webContents.capturePage()).toPNG());
         push('设置窗口：人格与「她的话」面板真的长出来了',
           form.personaFields.length === 5 && form.presets >= 6 && form.placeholder > 10
-          && form.actionToggles.length === 4 && form.idleUI === true && form.quietOptions === 24
+          && form.actionToggles.length === actionLines.ACTIONS.length && form.idleUI === true && form.quietOptions === 24
           && form.tryBtn === true && form.promptBtn === true,
           `人格字段=${form.personaFields.join('/')} 预设=${form.presets} 个 占位符=${form.placeholder} 字`
           + ` 时机开关=${form.actionToggles.join('/')} 静音时段选项=${form.quietOptions} 个`
@@ -2013,6 +2019,21 @@ async function runInteractionTest() {
         && offLines.pat === undefined,
         `happy 首句="${actionLines.LOCAL_LINES.happy[0]}"；收起来那句="${actionLines.LOCAL_LINES.happyOff[0]}"`
         + `（"尾巴"已去掉）；摸头=${actionLines.LOCAL_LINES.pat.length} 句（不进模型，四个时机的清单里没有它）`);
+
+      // (c2) 第 34 轮「吃瓜」：主人给的两句台词**原文**必须在表里；没配 API 时念的就是它们之一
+      const melon = actionLines.LOCAL_LINES.eatmelon || [];
+      const melonLine = await requestActionLine('eatmelon', { force: true });
+      push('「吃瓜」：主人给的两句原文在表里（只是觉得女孩子之间是真好啊 / 女女关系观察中）',
+        melon.includes('只是觉得女孩子之间是真好啊') && melon.includes('女女关系观察中')
+        && melonLine.source === 'local' && melon.includes(melonLine.text),
+        `共 ${melon.length} 句：${melon.map((t) => `"${t}"`).join(' / ')}；本次念的="${melonLine.text}"（来源=${melonLine.source} 原因=${melonLine.reason}）`);
+      push('「吃瓜」是独立时机：有菜单项、有标签、接上 API 时也能走模型',
+        actionLines.ACTIONS.includes('eatmelon')
+        && !!actionLines.ACTION_LABELS.eatmelon && !!actionLines.ACTION_HINTS.eatmelon
+        && actionLines.buildSystemPrompt({ persona: {}, action: 'eatmelon' }).includes('看戏')
+        && Object.keys(apiConfig.publicView().actionModel).includes('eatmelon'),
+        `ACTIONS 里含 eatmelon；标签="${actionLines.ACTION_LABELS.eatmelon}"；`
+        + `提示词里带"看戏"指令；设置页的开关表里也有它（${Object.keys(apiConfig.publicView().actionModel).join('/')}）`);
 
       // ★ 换人之后的"漏改探测器"：旧人设的词、鲸鱼娘的尾巴、各类点心，一个都不许再出现。
       //   为什么值得单独立一条：台词分散在**两个文件**（权威 lib/action-lines.js + 渲染层投影），
@@ -2376,7 +2397,7 @@ async function sendChat(text, source) {
   if (!msg) return { ok: false, kind: 'empty', text: '' };
   markUserActive('sendChat');   // 主人在跟她说话 → 空闲计时归零（别刚聊完她就"主动搭话"）
   if (chatState.sending) {
-    return { ok: false, kind: 'busy', text: '（人家还在想上一句呢…）' };
+    return { ok: false, kind: 'busy', text: '（我还在想上一句呢…）' };
   }
   chatState.sending = true;
   const started = Date.now();

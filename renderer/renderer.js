@@ -59,6 +59,8 @@
     happy: ['今天有你在，什么都很甜呢', 'ふふ，今天的心情，比红茶还暖', 'ふふ，那我们再来一杯茶吧'],
     happyOff: ['好啦，我把杯子收起来', '那，先这样，我随时都在哦'],
     idle: ['我去泡壶茶，你忙你的就好', '要不要一起喝杯茶？', '今天想弹点什么呢…你有什么想听的吗', '我只是觉得，这样安安静静的真好呀'],
+    // 第 34 轮：主人的名句梗（右键菜单「吃瓜」）。前两句是主人给的原文。
+    eatmelon: ['只是觉得女孩子之间是真好啊', '女女关系观察中', '（搬了把椅子坐下，安安静静地看）'],
   };
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
@@ -408,7 +410,7 @@
   //       密钥、请求、上下文全在主进程（渲染层带着 CSP default-src 'none'，本来就发不出请求）。
   const chatState = { sending: false, sends: 0, replies: 0, errors: 0, lastText: '', lastKind: null, lastMs: 0 };
   const CHAT_PLACEHOLDER = '跟我说句话吧，回车发送…';
-  const CHAT_BUSY_PLACEHOLDER = '人家正在想…（回车取消不了，稍等一下）';
+  const CHAT_BUSY_PLACEHOLDER = '我正在想…（回车取消不了，稍等一下）';
 
   function setChatBusy(on) {
     chatState.sending = !!on;
@@ -440,9 +442,9 @@
     } catch (err) {
       chatState.errors++;
       chatState.lastKind = 'ipc';
-      say('（人家这边出了点小问题…）', 4200);
+      say('（我这边出了点小问题…）', 4200);
       dlog('chat', '发送失败: ' + (err && err.message));
-      return { ok: false, kind: 'ipc', text: '（人家这边出了点小问题…）' };
+      return { ok: false, kind: 'ipc', text: '（我这边出了点小问题…）' };
     } finally {
       setChatBusy(false);
       if (chatInput && memoState.open) { try { chatInput.focus(); } catch { /* 忽略 */ } }
@@ -744,6 +746,17 @@
       const played = playAction(INTERACT_GROUP, ['pet', 'headpat', 'pat']);
       if (!played) { playAnim('pat', 720); dlog('action', '无交互素材 → 退回 CSS 形变动画'); }
       else dlog('action', `已播放「${INTERACT_GROUP}」交互动作组`);
+      return;
+    }
+    if (name === 'eatmelon') {
+      // 第 34 轮「吃瓜」：主人的名句梗。台词走**和别的时机同一条路**（接上 API 时由大模型说），
+      // 动作上给她一个"安安静静坐下看"的样子 —— 没有专门素材时用「靠近」组当观察姿态，
+      // 再没有就退回一个轻微的 CSS 形变。**不改变保持状态**（吃瓜不该顶掉「开心」的定格）。
+      requestLine('eatmelon', '菜单点了「吃瓜」');
+      if (!playAction('hover', ['look', 'watch', 'eatmelon'])) {
+        if (!playAction(INTERACT_GROUP, ['watch', 'eatmelon'])) playAnim('pat', 720);
+      }
+      dlog('action', '吃瓜：她坐到旁边观察去了');
       return;
     }
     if (name === 'happy') {
