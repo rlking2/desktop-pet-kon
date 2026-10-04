@@ -2005,13 +2005,41 @@ async function runInteractionTest() {
           r.source === 'local' && actionLines.LOCAL_LINES[a].includes(r.text),
           `来源=${r.source} 原因=${r.reason} 台词="${r.text}"`);
       }
-      push('本地台词表与第 31 轮**逐字未变**（离线体验零变化）',
-        actionLines.LOCAL_LINES.happy[0] === '嘿嘿～今天也很开心！'
-        && actionLines.LOCAL_LINES.happyOff[0] === '好啦，人家不闹了～'
-        && actionLines.LOCAL_LINES.angry[0] === '哼！不理你了。'
-        && actionLines.LOCAL_LINES.pat.length === 3 && actionLines.LOCAL_LINES.pat[0] === '唔……别摸啦。'
+      push('本地台词表已按主人指定的琴吹紬台词录入（第 33 轮）',
+        actionLines.LOCAL_LINES.happy[0] === '今天有你在，什么都很甜呢'
+        && actionLines.LOCAL_LINES.happyOff[1] === '那，先这样，我随时都在哦'
+        && actionLines.LOCAL_LINES.happyOff[0] === '好啦，我把杯子收起来'   // ← 主人点名改的那句（原来写的是"尾巴"）
+        && actionLines.LOCAL_LINES.pat.length === 3
         && offLines.pat === undefined,
-        `happy/happyOff/angry 首句原样；摸头=${actionLines.LOCAL_LINES.pat.length} 句（不进模型，四个时机的清单里没有它）`);
+        `happy 首句="${actionLines.LOCAL_LINES.happy[0]}"；收起来那句="${actionLines.LOCAL_LINES.happyOff[0]}"`
+        + `（"尾巴"已去掉）；摸头=${actionLines.LOCAL_LINES.pat.length} 句（不进模型，四个时机的清单里没有它）`);
+
+      // ★ 换人之后的"漏改探测器"：旧人设的词、鲸鱼娘的尾巴、各类点心，一个都不许再出现。
+      //   为什么值得单独立一条：台词分散在**两个文件**（权威 lib/action-lines.js + 渲染层投影），
+      //   换人时最容易漏改其中一处；靠人工核对迟早会漏，交给断言盯。
+      const BANNED = ['人家', '本鲸', '白饭', '尾巴', '和菓子', '大福', '炒面', '点心'];      const allLocal = Object.entries(actionLines.LOCAL_LINES)
+        .flatMap(([k, arr]) => arr.map((t) => ({ k, t })));
+      const leaked = allLocal.filter(({ t }) => BANNED.some((w) => t.includes(w)));
+      push('本地台词里没有旧人设的词、没有尾巴、没有任何点心（换人漏改探测器）',
+        leaked.length === 0,
+        leaked.length
+          ? `漏了 ${leaked.length} 句：${leaked.map(({ k, t }) => `${k}:"${t}"`).join(' ')}`
+          : `扫了 ${allLocal.length} 句，禁词表 ${BANNED.join('/')} 一个都没出现`);
+
+      // ★ 渲染层那份 LINES 必须和权威表**逐字一致**：它是投影，不是第二份真值。
+      //   这次换人正好踩到这个风险点（两边都得改），所以补一条断言永久盯着。
+      const rendererLines = await js('window.__petTest.localLines()');
+      const keys = Object.keys(actionLines.LOCAL_LINES);
+      const mismatch = keys.filter((k) => {
+        const a = (actionLines.LOCAL_LINES[k] || []).join('|');
+        const b = ((rendererLines && rendererLines[k]) || []).join('|');
+        return a !== b;
+      });
+      push('渲染层的台词投影与权威表逐字一致（两个文件不会各说各话）',
+        mismatch.length === 0 && keys.length === Object.keys(rendererLines || {}).length,
+        mismatch.length
+          ? `不一致的组：${mismatch.join('/')}（改台词必须两边一起改）`
+          : `六组台词（${keys.join('/')}）在 lib/action-lines.js 与 renderer.js 里逐字相同`);
 
       // (d) 「对话」关掉时也不许走模型
       writeCfg({ apiKey: 'sk-selftest-not-real', enabled: false, mockReply: '不许出现的一句' });
@@ -2050,20 +2078,39 @@ async function runInteractionTest() {
         `angry: 来源=${angryOff.source} 原因=${angryOff.reason}；happy: 来源=${happyOn.source}`);
 
       // (h) 人格真的以文本进了请求的 system（用**独立的人格标记**验，不靠上一句的缓存）
-      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '人格标记测试', persona: { identity: 'PERSONA_MARK_18075', style: '毒舌一点', quirks: '爱吃白饭' } });
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '人格标记测试', persona: { identity: 'PERSONA_MARK_18075', style: '毒舌一点', quirks: '爱喝红茶' } });
       const dbg = await apiLinesDebugPrompt('happy');
       push('人格文本进入实际请求的 system（改人格 = 改她的说话方式）',
-        dbg.system.includes('PERSONA_MARK_18075') && dbg.system.includes('毒舌一点') && dbg.system.includes('爱吃白饭')
+        dbg.system.includes('PERSONA_MARK_18075') && dbg.system.includes('毒舌一点') && dbg.system.includes('爱喝红茶')
         && dbg.messages[0].role === 'system' && dbg.messages.length === 2,
         `system 里带 identity/style/quirks 三项；消息数=${dbg.messages.length}（无历史：动作反应是独立一句）`);
+
+      // (h2) 默认人格已换成琴吹紬（第 33 轮）：预设第一项就是她，且带着她自己的东西
+      // ⚠️ 禁止词只扫 identity/style/quirks/examples 四项：**taboos（禁忌）里必须能写
+      //   "不用『人家』『本鲸』这类自称"** —— 那是正确的写法，第一版断言把 taboos 也一起禁了，
+      //   结果把正确的写法判成错的（自检当场抓到）。
+      const dflt = actionLines.PERSONA_PRESETS[0];
+      const dfltPositive = [dflt.persona.identity, dflt.persona.style, dflt.persona.quirks, dflt.persona.examples].join('\n');
+      const oldPersona = ['鲸鱼', '美人鱼', '白饭', '本鲸'].filter((w) => dfltPositive.includes(w));
+      push('默认人格预设 = 琴吹紬（不再是鲸鱼娘）',
+        dflt.label.includes('琴吹紬') && dfltPositive.includes('轻音少女') && dfltPositive.includes('键盘')
+        && dfltPositive.includes('红茶') && dfltPositive.includes('古典乐')
+        && dflt.persona.taboos.includes('人家')   // 禁忌栏**应该**点名列禁止的自称
+        && oldPersona.length === 0,
+        `预设名="${dflt.label}"；身份=轻音少女键盘手、爱好=红茶/古典乐、例句含茶；`
+        + `旧人设词在身份/风格/癖好/例句里${oldPersona.length ? '仍有：' + oldPersona.join('/') : '一个都没有'}`
+        + `（"禁忌"栏点名列了不许用的自称，这是对的，不参与禁词扫描）`);
 
       // (i) 空闲主动开口：走模型 → 台词进气泡
       const idleBase = new Date('2026-06-15T10:00:00').getTime();
       writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '空闲时会说的话', muted: false, actionModel: { idle: true }, idle: { enabled: true, minutes: 60, perDay: 12, quietFrom: 22, quietTo: 8 } });
-      const idleNowMs = idleBase + 70 * 60 * 1000;   // 注入的"现在"：10:00 之后 70 分钟
-      // ★ 三样都要注入才轮得到"她该开口了"：现在几点 / 上次开口 / **上次主人理她**。
-      //   少了 baselineMs，too_soon 会先把判定拦下来（实测踩过：daily_cap 和 quiet_hours 永远轮不到）。
-      await idleStateInject({ test: true, enabled: true, nowMs: idleNowMs, baseMs: idleBase, baselineMs: idleBase });
+      // ★ 注入的"现在"必须**远超过** minutes × 抖动的上限：闸门里有 ±25% 随机抖动，
+      //   写 70 分钟而阈值是 60×1.25=75 分钟时会**随随机数偶发变红**（实测踩过：同一条断言一次绿一次红）。
+      //   所以"上次开口/上次理她"都放到 3 小时前 —— 任何抖动下都稳稳超过阈值。
+      const idleNowMs = idleBase + 70 * 60 * 1000;
+      const idleOldBase = idleBase - 3 * 60 * 60 * 1000;
+      // 三样都要注入才轮得到"她该开口了"：现在几点 / 上次开口 / 上次主人理她。
+      await idleStateInject({ test: true, enabled: true, nowMs: idleNowMs, baseMs: idleOldBase, baselineMs: idleOldBase });
       const idleTick = await idleTickOnce(true);
       await wait(400);
       const idleState = await js('window.__petTest.state()');
@@ -2075,8 +2122,9 @@ async function runInteractionTest() {
       // (j) 每日上限：接着**同一段注入时间**、把上限压到 1 —— 这时今天已经说过 1 次了。
       //    ⚠️ 必须复用同一个 nowMs：计数是按"本地日期"归零的，换一天就等于归零，
       //       那样"到上限了没"这条会因为刚归零而永远轮不到（实测踩过）。
+      //    ⚠️ baseMs/baselineMs 也用那个"3 小时前"：否则 too_soon（含 ±25% 抖动）会先拦下来。
       writeCfg({ idle: { enabled: true, minutes: 60, perDay: 1, quietFrom: 22, quietTo: 8 } });
-      const capInject = await idleStateInject({ test: true, nowMs: idleNowMs, baseMs: idleBase, baselineMs: idleBase });
+      const capInject = await idleStateInject({ test: true, nowMs: idleNowMs, baseMs: idleOldBase, baselineMs: idleOldBase });
       const capped = await idleTickOnce(true);
       push('每天最多开口 N 次：到上限就闭嘴（不烧 token）',
         capInject.gate.allow === false && capInject.gate.reason === 'daily_cap'
