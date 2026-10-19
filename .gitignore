@@ -7,3 +7,4 @@ build-resources/
 _fixtures/
 assets/build/
 assets/manifest.json
+*.bundle
