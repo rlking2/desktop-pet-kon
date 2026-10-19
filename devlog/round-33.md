@@ -338,3 +338,30 @@ npm run installer  # 安装包：make-icon → electron-builder --win（NSIS，�
 | `桌宠-git备份-20260923-184216.bundle` | **删除**（主人决定） |
 | `LICENSE` | 由远端并入（MIT，`rlking2`） |
 | `README.md` | 新增素材版权提醒 |
+
+### 附记：一次差点冤枉自己的"验证"
+
+推完版权提醒后，人家用 `raw.githubusercontent.com` 复核，结果**关键字全查不到**，
+差点以为"没推上去"。实际是两种情况叠在一起，**都不是仓库的问题**：
+
+1. **人家的读取脚本编码错了**：`Invoke-WebRequest` / `WebClient` 那份把 UTF-8 的字节
+   按单字节解了，中文全成了乱码（对比时能看到 `馃幑 鐞村惞绱` 这种），关键字自然搜不到。
+   —— 这正是本项目 `README` 里"本机陷阱"那一类问题，只是这次踩在**验证脚本**上。
+2. **`raw` 有 CDN 缓存**：推送后 1 分钟内，`raw.githubusercontent.com` 还在返回上一版
+   （40135 字节，而 HEAD 的 blob 是 40781 字节）。
+
+**可靠的验证方式**（这次用的就是它）：
+
+```powershell
+# ① 用 blob SHA 直接问 API（走对象库，绕不过缓存）
+git rev-parse HEAD:README.md          # → 6b23a39…
+# ② GitHub 网页端（HTML）搜关键字
+Invoke-WebRequest 'https://github.com/rlking2/desktop-pet-kon' -UseBasicParsing
+```
+
+实测结果：远端 blob SHA 与本地**完全一致**；网页端含「素材版权提醒」「kakifly」「芳文社」；
+仓库显示 **48 个提交**。`raw` 那条缓存过几分钟自己就好。
+
+> 教训：**"验证失败"先怀疑验证手段，再怀疑被验证的东西**。
+> 这次差点把一次成功的推送判成失败 —— 和第 3 轮"自检全绿但真机是坏的"正好相反：
+> 那次是工具太信自己，这次是工具报了个假警。
