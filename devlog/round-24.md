@@ -89,7 +89,7 @@ node_modules\electron\dist\electron.exe . "--user-data-dir=$env:TEMP\petcheck"
 卸载器把快捷方式删掉后，主人原来那份便携版快捷方式就没了 → 验证完**手动重建**回便携版：
 
 ```
-桌面\桌宠.lnk → C:\Users\18075\Desktop\桌宠\dist\桌宠便携版\桌宠.exe
+桌面\桌宠.lnk → C:\Users\<用户名>\Desktop\桌宠\dist\桌宠便携版\桌宠.exe
 ```
 
 ## 验证（真跑，不是推理）

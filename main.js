@@ -2099,10 +2099,10 @@ async function runInteractionTest() {
         `angry: 来源=${angryOff.source} 原因=${angryOff.reason}；happy: 来源=${happyOn.source}`);
 
       // (h) 人格真的以文本进了请求的 system（用**独立的人格标记**验，不靠上一句的缓存）
-      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '人格标记测试', persona: { identity: 'PERSONA_MARK_18075', style: '毒舌一点', quirks: '爱喝红茶' } });
+      writeCfg({ apiKey: 'sk-selftest-not-real', enabled: true, mockReply: '人格标记测试', persona: { identity: 'PERSONA_MARK_SELFTEST', style: '毒舌一点', quirks: '爱喝红茶' } });
       const dbg = await apiLinesDebugPrompt('happy');
       push('人格文本进入实际请求的 system（改人格 = 改她的说话方式）',
-        dbg.system.includes('PERSONA_MARK_18075') && dbg.system.includes('毒舌一点') && dbg.system.includes('爱喝红茶')
+        dbg.system.includes('PERSONA_MARK_SELFTEST') && dbg.system.includes('毒舌一点') && dbg.system.includes('爱喝红茶')
         && dbg.messages[0].role === 'system' && dbg.messages.length === 2,
         `system 里带 identity/style/quirks 三项；消息数=${dbg.messages.length}（无历史：动作反应是独立一句）`);
 

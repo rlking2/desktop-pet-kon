@@ -8,7 +8,7 @@
 |---|---|
 | 主程序 | `dist\桌宠便携版\桌宠.exe` |
 | 整个便携包（可挪走 / U 盘） | `dist\桌宠便携版\`（**370.7 MB**，Electron 运行时占绝大部分） |
-| 桌面快捷方式 | `C:\Users\18075\Desktop\桌宠.lnk` → 上面那个 exe（带自制图标） |
+| 桌面快捷方式 | `C:\Users\<用户名>\Desktop\桌宠.lnk` → 上面那个 exe（带自制图标） |
 | 打包脚本 | `scripts/make-exe.js`（`npm run exe`），**零依赖、不联网、约 3 秒** |
 
 双击即开，**不弹控制台窗口**。打包版**自检 94/94 全绿**（见下面"验证"）。
@@ -128,7 +128,7 @@ Start-Process ".\dist\桌宠便携版\桌宠.exe" -ArgumentList "--user-data-dir
 ### ③ 快捷方式实测
 
 ```
-目标    : C:\Users\18075\Desktop\桌宠\dist\桌宠便携版\桌宠.exe   （存在 ✓）
+目标    : C:\Users\<用户名>\Desktop\桌宠\dist\桌宠便携版\桌宠.exe   （存在 ✓）
 工作目录: ...\dist\桌宠便携版
 图标    : ...\dist\桌宠便携版\桌宠.ico,0                        （存在 ✓）
 ```
