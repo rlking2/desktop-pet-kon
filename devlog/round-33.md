@@ -269,3 +269,72 @@ npm run installer  # 安装包：make-icon → electron-builder --win（NSIS，�
 
 `README.md` 里那张「每轮验收清单」的 11 个勾**全部清回空白** —— 换了新包、也换了人物，
 上一轮的勾不再代表这一版，需要主人重新过一遍（尤其第 10–12 条只有接上自己的密钥才能验）。
+
+---
+
+## 附四：第 36 轮 —— 推送到公开 GitHub 仓库
+
+主人给了仓库地址：`https://github.com/rlking2/desktop-pet-kon.git`，要求把当前项目推上去。
+**公开仓库 = 隐私与授权的分界线**，所以这一轮没直接 `git push`，而是先审后推。
+
+### 推送前做了什么（三项扫描 + 一次合并）
+
+| 检查 | 结果 |
+|---|---|
+| 密钥（整个 HEAD 树：`sk-` / `api_key` / `PRIVATE KEY` / `ghp_` / `AKIA`） | **零命中**；历史里也没有真实形态的密钥 |
+| 个人路径 | **发现 4 处** → 已占位化（见下） |
+| 产物/依赖是否被误跟踪 | `dist/`、`dist-installer/`、`artifacts/`、`node_modules/` 全部**未跟踪**（`.gitignore` 本来就对） |
+| 远端状态 | **不是空仓库**：只有一个 `Initial commit`（`376ef9c`），里面仅一份 MIT `LICENSE` |
+
+**远端那个 LICENSE 不能丢**（它是 `rlking2` 建仓时放的），而本地 45 个提交与它**没有共同祖先**。
+处理方式：`git merge origin/main --allow-unrelated-histories` —— 合并而不是 rebase，
+**已公开的历史一个提交都不改写**。合并后 `LICENSE` 干净并入，无冲突。
+
+### 清理掉的个人痕迹（5 行，逐行核对过 diff）
+
+| 文件 | 改动 |
+|---|---|
+| `devlog/round-10.md`（2 处） | `C:\Users\18075\...` → `C:\Users\<用户名>\...` |
+| `devlog/round-24.md`（1 处） | 同上 |
+| `main.js`（2 处） | 自检人格标记 `PERSONA_MARK_18075` → `PERSONA_MARK_SELFTEST` |
+
+> devlog 是归档（细则第 6 条"历史正文不改写"），所以**只把个人路径换成占位符**，其余文字零改动。
+> 测试标记改过名字，所以**重跑了 `npm run verify`：146/146 ✅ + 像素 5/5 ✅**。
+
+### 删掉了本地 git 备份包（主人决定）
+
+仓库根目录跟踪着 `桌宠-git备份-20260923-184216.bundle`（21.4 KB，2026-09-23 的整库备份）。
+它引用的 `bc0f478(refs/heads/master)` **不在当前仓库对象库里**（当前仓库是后来重新初始化的），
+所以人家**无法先读它里面装了什么** —— 不能替主人决定"能不能公开"。
+把选项和风险（20 KB、可恢复到 9/23、但内容不可读、可能含早期个人路径）摊给主人后，
+主人选择**彻底删除**。已 `git rm` + 物理删除，并把 `*.bundle` 写进 `.gitignore`（以后备份不会误推）。
+
+### 推送结果（去远端核实过，不只信命令输出）
+
+| 项 | 结果 |
+|---|---|
+| 本地 HEAD 与远端 `main` | **完全一致**：`d16738982980be8062408f8881f2ab27d1af3f48` |
+| 远端条目数 | 132（未截断） |
+| 根目录关键文件 | `README.md` / `LICENSE` / `main.js` / `preload.js` / `package.json` / `lib/action-lines.js` / `renderer/settings.html` / `devlog/round-33.md` / `scripts/make-exe.js` / `electron-builder.config.js` **全部在** |
+| 公开链路实测（raw.githubusercontent.com） | README 能读到，且含「琴吹紬」「吃瓜（围观一下）」「女女关系观察中」「146/146」 |
+| 个人路径残留 | 公开链路抓 `lib/action-lines.js` / `main.js` / `devlog/round-10.md`：**零命中** |
+| bundle | 公开链路访问 → **HTTP 404**（确认已不在） |
+
+### 必须让主人知道的一件事：素材版权
+
+`assets/` 里的立绘是**从书页照片/截图裁的**，角色「琴吹紬」与原图权利属于
+**kakifly / 芳文社 / 京都动画**。**MIT 许可只覆盖代码，不覆盖这些图像**。
+人家已在 `README.md` 的「换成主人自己的立绘」一节顶上加了醒目的版权提醒；
+要公开分发/商用/再发布安装包，需主人自行确认授权，或换成有权使用的图
+（换图不用改代码，按 `assets/README.md` 的流程接进来即可）。
+
+### 本轮改动文件
+
+| 文件 | 改动 |
+|---|---|
+| `devlog/round-10.md`、`devlog/round-24.md` | 3 处个人路径 → 占位符 |
+| `main.js` | 2 处测试标记去个人编号 |
+| `.gitignore` | 新增 `*.bundle` |
+| `桌宠-git备份-20260923-184216.bundle` | **删除**（主人决定） |
+| `LICENSE` | 由远端并入（MIT，`rlking2`） |
+| `README.md` | 新增素材版权提醒 |
